@@ -15,6 +15,7 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
 
@@ -22,7 +23,8 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - run: cargo test
+      - name: Run tests
+        run: cargo test
 
   build:
     name: Build (${{ matrix.target }})
@@ -113,9 +115,10 @@ jobs:
             archive: tar.gz
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      # Rust toolchain
+      # Rust
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -126,21 +129,33 @@ jobs:
         with:
           key: ${{ matrix.target }}
 
-      # Cross compilation for Linux
+      # Linux cross compilation
       - name: Install cross
         if: matrix.method == 'cross'
-        run: cargo install cross --locked
+        uses: taiki-e/install-action@cross
 
-      # Android NDK
+      # Android setup
+      - name: Set up Java
+        if: matrix.method == 'android'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
       - name: Setup Android SDK
         if: matrix.method == 'android'
-        uses: android-actions/setup-android@v3
+        uses: android-actions/setup-android@v4
+        with:
+          packages: ''
 
       - name: Install Android NDK
         if: matrix.method == 'android'
         shell: bash
-        run: sdkmanager "ndk;27.2.12479018"
+        run: |
+          set -euo pipefail
+          sdkmanager --install "ndk;27.2.12479018"
 
+      # Android linker configuration
       - name: Configure Android linker
         if: matrix.method == 'android'
         shell: bash
@@ -155,19 +170,32 @@ jobs:
               LINKER="aarch64-linux-android21-clang"
               VAR="CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER"
               ;;
+
             armv7-linux-androideabi)
               LINKER="armv7a-linux-androideabi19-clang"
               VAR="CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER"
               ;;
+
             i686-linux-android)
               LINKER="i686-linux-android19-clang"
               VAR="CARGO_TARGET_I686_LINUX_ANDROID_LINKER"
               ;;
+
             x86_64-linux-android)
               LINKER="x86_64-linux-android21-clang"
               VAR="CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER"
               ;;
+
+            *)
+              echo "Unsupported Android target"
+              exit 1
+              ;;
           esac
+
+          if [ ! -x "$TOOLCHAIN/$LINKER" ]; then
+            echo "Android linker not found: $TOOLCHAIN/$LINKER"
+            exit 1
+          fi
 
           echo "$VAR=$TOOLCHAIN/$LINKER" >> "$GITHUB_ENV"
 
@@ -177,10 +205,12 @@ jobs:
         run: |
           set -euo pipefail
 
+          TARGET="${{ matrix.target }}"
+
           if [ "${{ matrix.method }}" = "cross" ]; then
-            cross build --release --target "${{ matrix.target }}"
+            cross build --release --target "$TARGET"
           else
-            cargo build --release --target "${{ matrix.target }}"
+            cargo build --release --target "$TARGET"
           fi
 
       # Package
@@ -193,13 +223,21 @@ jobs:
           NAME="stewdio-$TARGET"
 
           BIN="stewdio"
+
           if [[ "${{ runner.os }}" == "Windows" ]]; then
             BIN="stewdio.exe"
           fi
 
           mkdir -p "dist/$NAME"
 
-          cp "target/$TARGET/release/$BIN" "dist/$NAME/"
+          SOURCE="target/$TARGET/release/$BIN"
+
+          if [ ! -f "$SOURCE" ]; then
+            echo "Binary not found: $SOURCE"
+            exit 1
+          fi
+
+          cp "$SOURCE" "dist/$NAME/"
 
           if [ -f README.md ]; then
             cp README.md "dist/$NAME/"
@@ -208,14 +246,14 @@ jobs:
           cd dist
 
           if [ "${{ matrix.archive }}" = "zip" ]; then
-            7z a "$NAME.zip" "$NAME" > /dev/null
+            7z a "$NAME.zip" "$NAME"
           else
             tar czf "$NAME.tar.gz" "$NAME"
           fi
 
           echo "ASSET=dist/$NAME.${{ matrix.archive }}" >> "$GITHUB_ENV"
 
-      # Release assets
+      # Upload release assets
       - name: Upload to release
         if: github.event_name == 'release'
         shell: bash
@@ -228,11 +266,12 @@ jobs:
             "$ASSET" \
             --clobber
 
-      # Manual workflow artifacts
+      # Upload manual workflow artifacts
       - name: Upload workflow artifact
-        if: github.event_name != 'release'
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
         with:
           name: stewdio-${{ matrix.target }}
           path: ${{ env.ASSET }}
           if-no-files-found: error
+
