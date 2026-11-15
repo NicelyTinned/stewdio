@@ -1,37 +1,27 @@
-name: Build
+name: Build and Release
 
 on:
-  release:
-    types: [published]
+  push:
+    tags:
+      - "v*"
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  ANDROID_NDK_VERSION: "27.2.12479018"
+  ANDROID_API_LEVEL: "21"
 
 jobs:
-  test:
-    name: Test
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-
-      - name: Run tests
-        run: cargo test
-
   build:
-    name: Build (${{ matrix.target }})
-    needs: test
+    name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
 
     strategy:
@@ -39,121 +29,145 @@ jobs:
       matrix:
         include:
           # Linux
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            method: cross
-            archive: tar.gz
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-24.04
+            method: cargo
 
-          - os: ubuntu-latest
-            target: i686-unknown-linux-gnu
+          - target: i686-unknown-linux-gnu
+            os: ubuntu-24.04
             method: cross
-            archive: tar.gz
 
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04
             method: cross
-            archive: tar.gz
 
-          - os: ubuntu-latest
-            target: armv7-unknown-linux-gnueabihf
+          - target: armv7-unknown-linux-gnueabihf
+            os: ubuntu-24.04
             method: cross
-            archive: tar.gz
 
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-24.04
             method: cross
-            archive: tar.gz
 
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-musl
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04
             method: cross
-            archive: tar.gz
 
           # Windows
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
+          - target: x86_64-pc-windows-msvc
+            os: windows-2025
             method: cargo
-            archive: zip
 
-          - os: windows-latest
-            target: i686-pc-windows-msvc
+          - target: i686-pc-windows-msvc
+            os: windows-2025
             method: cargo
-            archive: zip
 
-          - os: windows-latest
-            target: aarch64-pc-windows-msvc
+          - target: aarch64-pc-windows-msvc
+            os: windows-11-arm
             method: cargo
-            archive: zip
 
           # macOS
-          - os: macos-latest
-            target: aarch64-apple-darwin
+          - target: aarch64-apple-darwin
+            os: macos-15
             method: cargo
-            archive: tar.gz
 
-          - os: macos-latest
-            target: x86_64-apple-darwin
+          - target: x86_64-apple-darwin
+            os: macos-15-intel
             method: cargo
-            archive: tar.gz
 
           # Android
-          - os: ubuntu-latest
-            target: aarch64-linux-android
+          - target: aarch64-linux-android
+            os: ubuntu-24.04
             method: android
-            archive: tar.gz
 
-          - os: ubuntu-latest
-            target: armv7-linux-androideabi
+          - target: armv7-linux-androideabi
+            os: ubuntu-24.04
             method: android
-            archive: tar.gz
 
-          - os: ubuntu-latest
-            target: i686-linux-android
+          - target: i686-linux-android
+            os: ubuntu-24.04
             method: android
-            archive: tar.gz
 
-          - os: ubuntu-latest
-            target: x86_64-linux-android
+          - target: x86_64-linux-android
+            os: ubuntu-24.04
             method: android
-            archive: tar.gz
 
     steps:
-      # Checkout
-      - name: Checkout
-        uses: actions/checkout@v4
+      # --------------------------------------------------
+      # CHECKOUT
+      # --------------------------------------------------
 
-      # Rust
-      - name: Install Rust
+      - name: Checkout repository
+        uses: actions/checkout@v7
+
+      # --------------------------------------------------
+      # PYTHON
+      # Used to discover Cargo binary targets.
+      # --------------------------------------------------
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+
+      # --------------------------------------------------
+      # RUST
+      # --------------------------------------------------
+
+      - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - name: Rust cache
-        uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.target }}
+      - name: Display toolchain information
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustc --version
+          cargo --version
+          rustup target list --installed
 
-      # Linux cross compilation
-      - name: Install cross
+      # --------------------------------------------------
+      # LINUX BUILD DEPENDENCIES
+      # --------------------------------------------------
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux' && matrix.method == 'cargo'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          sudo apt-get update
+
+          sudo apt-get install -y \
+            build-essential \
+            pkg-config \
+            git \
+            curl \
+            ca-certificates
+
+      # --------------------------------------------------
+      # CROSS
+      # --------------------------------------------------
+
+      - name: Install Cross
         if: matrix.method == 'cross'
-        uses: taiki-e/install-action@cross
-
-      # Android Java
-      - name: Set up Java
-        if: matrix.method == 'android'
-        uses: actions/setup-java@v4
+        uses: taiki-e/install-action@v2
         with:
-          distribution: temurin
-          java-version: '17'
+          tool: cross
 
-      # Android SDK
+      # --------------------------------------------------
+      # ANDROID SDK
+      # --------------------------------------------------
+
       - name: Setup Android SDK
         if: matrix.method == 'android'
         uses: android-actions/setup-android@v4
         with:
-          packages: ''
+          packages: ""
+          accept-android-sdk-licenses: true
+          log-accepted-android-sdk-licenses: false
 
-      # Android NDK
       - name: Install Android NDK
         if: matrix.method == 'android'
         shell: bash
@@ -162,18 +176,27 @@ jobs:
 
           SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
 
-          if [ -z "$SDK_ROOT" ]; then
-            echo "ERROR: Android SDK root not found"
+          if [[ -z "$SDK_ROOT" ]]; then
+            echo "::error::ANDROID_HOME and ANDROID_SDK_ROOT are missing."
             exit 1
           fi
 
-          sdkmanager --sdk_root="$SDK_ROOT" \
-            --install "ndk;27.2.12479018"
+          if ! command -v sdkmanager >/dev/null 2>&1; then
+            echo "::error::sdkmanager was not found."
+            exit 1
+          fi
 
-          NDK="$SDK_ROOT/ndk/27.2.12479018"
+          echo "Android SDK: $SDK_ROOT"
+          echo "Installing NDK: $ANDROID_NDK_VERSION"
 
-          if [ ! -d "$NDK" ]; then
-            echo "ERROR: Android NDK installation failed"
+          sdkmanager \
+            --sdk_root="$SDK_ROOT" \
+            --install "ndk;$ANDROID_NDK_VERSION"
+
+          NDK="$SDK_ROOT/ndk/$ANDROID_NDK_VERSION"
+
+          if [[ ! -d "$NDK" ]]; then
+            echo "::error::NDK installation failed: $NDK"
             exit 1
           fi
 
@@ -182,176 +205,388 @@ jobs:
           echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_ROOT=$NDK" >> "$GITHUB_ENV"
 
-      # Android linker
-      - name: Configure Android linker
+          echo "NDK successfully installed."
+          ls -la "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin" | head -30
+
+      # --------------------------------------------------
+      # ANDROID LINKER CONFIGURATION
+      #
+      # IMPORTANT:
+      # Uses the NDK's official API-specific compiler
+      # drivers. No custom linker wrappers.
+      # --------------------------------------------------
+
+      - name: Configure Android toolchain
         if: matrix.method == 'android'
         shell: bash
+        env:
+          ANDROID_TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
 
-          NDK="$ANDROID_NDK_HOME"
+          NDK="${ANDROID_NDK_HOME}"
+          BIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          API="$ANDROID_API_LEVEL"
 
-          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
-          BIN="$TOOLCHAIN/bin"
-          SYSROOT="$TOOLCHAIN/sysroot"
+          if [[ ! -d "$BIN" ]]; then
+            echo "::error::NDK LLVM toolchain directory not found: $BIN"
+            exit 1
+          fi
 
-          case "${{ matrix.target }}" in
+          case "$ANDROID_TARGET" in
 
             aarch64-linux-android)
               TRIPLE="aarch64-linux-android"
-              API=21
-              VAR="CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER"
+              ANDROID_ABI="arm64-v8a"
               ;;
 
             armv7-linux-androideabi)
               TRIPLE="armv7a-linux-androideabi"
-              API=19
-              VAR="CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER"
+              ANDROID_ABI="armeabi-v7a"
               ;;
 
             i686-linux-android)
               TRIPLE="i686-linux-android"
-              API=19
-              VAR="CARGO_TARGET_I686_LINUX_ANDROID_LINKER"
+              ANDROID_ABI="x86"
               ;;
 
             x86_64-linux-android)
               TRIPLE="x86_64-linux-android"
-              API=21
-              VAR="CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER"
+              ANDROID_ABI="x86_64"
               ;;
 
             *)
-              echo "Unsupported Android target"
+              echo "::error::Unsupported Android target: $ANDROID_TARGET"
               exit 1
               ;;
           esac
 
-          CLANG="$BIN/clang"
-          WRAPPER="$RUNNER_TEMP/android-${{ matrix.target }}-linker"
+          LINKER="$BIN/${TRIPLE}${API}-clang"
+          CXX="$BIN/${TRIPLE}${API}-clang++"
+          AR="$BIN/llvm-ar"
+          RANLIB="$BIN/llvm-ranlib"
+          STRIP="$BIN/llvm-strip"
 
-          if [ ! -x "$CLANG" ]; then
-            echo "ERROR: NDK Clang not found: $CLANG"
+          # Verify every required NDK executable.
+          for TOOL in "$LINKER" "$CXX" "$AR" "$RANLIB" "$STRIP"; do
+            if [[ ! -x "$TOOL" ]]; then
+              echo "::error::Required Android tool missing: $TOOL"
+              exit 1
+            fi
+          done
+
+          echo "========================================"
+          echo "Android target: $ANDROID_TARGET"
+          echo "Android ABI: $ANDROID_ABI"
+          echo "Minimum API: $API"
+          echo "Linker: $LINKER"
+          echo "C compiler: $LINKER"
+          echo "C++ compiler: $CXX"
+          echo "========================================"
+
+          # Confirm the linker can locate the Android CRT.
+          CRT="$("$LINKER" -print-file-name=crtbegin_dynamic.o)"
+
+          if [[ "$CRT" == "crtbegin_dynamic.o" || ! -f "$CRT" ]]; then
+            echo "::error::crtbegin_dynamic.o cannot be found."
+            echo "NDK: $NDK"
+            echo "Target: $ANDROID_TARGET"
+            echo "CRT result: $CRT"
+
+            find "$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib" \
+              -name 'crtbegin_dynamic.o' -print || true
+
             exit 1
           fi
 
-          if [ ! -d "$SYSROOT" ]; then
-            echo "ERROR: Android sysroot not found: $SYSROOT"
+          echo "Found Android CRT: $CRT"
+
+          # Actually compile and link a test executable.
+          # This catches missing CRT objects and Android libraries
+          # before Cargo starts building the project.
+          TEST_SOURCE="$RUNNER_TEMP/android-link-test.c"
+          TEST_OUTPUT="$RUNNER_TEMP/android-link-test"
+
+          printf 'int main(void) { return 0; }\n' > "$TEST_SOURCE"
+
+          "$LINKER" "$TEST_SOURCE" -llog -o "$TEST_OUTPUT"
+
+          if [[ ! -f "$TEST_OUTPUT" ]]; then
+            echo "::error::Android linker smoke test failed."
             exit 1
           fi
 
-          # Create linker wrapper
-          cat > "$WRAPPER" <<EOF
-          #!/usr/bin/env bash
-          set -euo pipefail
+          echo "Android linker smoke test passed."
 
-          exec "$CLANG" \
-            --target="$TRIPLE$API" \
-            --sysroot="$SYSROOT" \
-            -B"$BIN" \
-            -fuse-ld=lld \
-            "\$@"
-          EOF
+          # Cargo linker environment variable.
+          TARGET_KEY="${ANDROID_TARGET^^}"
+          TARGET_KEY="${TARGET_KEY//-/_}"
 
-          chmod +x "$WRAPPER"
+          echo "CARGO_TARGET_${TARGET_KEY}_LINKER=$LINKER" >> "$GITHUB_ENV"
 
-          # Verify compiler
-          echo "Checking Android linker..."
-          "$WRAPPER" --version
+          # Native dependency compiler configuration.
+          echo "CC=$LINKER" >> "$GITHUB_ENV"
+          echo "CXX=$CXX" >> "$GITHUB_ENV"
+          echo "AR=$AR" >> "$GITHUB_ENV"
+          echo "RANLIB=$RANLIB" >> "$GITHUB_ENV"
+          echo "STRIP=$STRIP" >> "$GITHUB_ENV"
 
-          # Verify Android startup objects and system libraries
-          CRT="$("$WRAPPER" -print-file-name=crtbegin_dynamic.o)"
-          LOG="$("$WRAPPER" -print-file-name=liblog.so)"
+          # NDK CMake support for dependencies using CMake.
+          echo "ANDROID_ABI=$ANDROID_ABI" >> "$GITHUB_ENV"
+          echo "ANDROID_PLATFORM=android-$API" >> "$GITHUB_ENV"
+          echo "CMAKE_SYSTEM_VERSION=$API" >> "$GITHUB_ENV"
+          echo "CMAKE_ANDROID_ARCH_ABI=$ANDROID_ABI" >> "$GITHUB_ENV"
+          echo "CMAKE_TOOLCHAIN_FILE=$NDK/build/cmake/android.toolchain.cmake" >> "$GITHUB_ENV"
 
-          echo "CRT: $CRT"
-          echo "liblog: $LOG"
+      # --------------------------------------------------
+      # DISCOVER EXECUTABLES
+      # Avoids assuming that the Cargo binary is named
+      # stew dio or stew dio.exe.
+      # --------------------------------------------------
 
-          if [ ! -f "$CRT" ]; then
-            echo "ERROR: crtbegin_dynamic.o not found"
-            exit 1
-          fi
-
-          if [ ! -f "$LOG" ]; then
-            echo "ERROR: liblog.so not found"
-            exit 1
-          fi
-
-          echo "$VAR=$WRAPPER" >> "$GITHUB_ENV"
-
-          echo "Android linker configured successfully"
-
-      # Build
-      - name: Build
+      - name: Discover Cargo binary targets
+        id: binaries
         shell: bash
         run: |
           set -euo pipefail
 
-          TARGET="${{ matrix.target }}"
+          BIN_NAMES="$(
+            python - <<'PY'
+          import json
+          import subprocess
+          import sys
 
-          if [ "${{ matrix.method }}" = "cross" ]; then
-            cross build --release --target "$TARGET"
+          result = subprocess.run(
+              [
+                  "cargo",
+                  "metadata",
+                  "--no-deps",
+                  "--format-version",
+                  "1",
+              ],
+              check=True,
+              capture_output=True,
+              text=True,
+          )
+
+          metadata = json.loads(result.stdout)
+
+          members = set(
+              metadata.get("workspace_default_members")
+              or metadata.get("workspace_members", [])
+          )
+
+          binaries = set()
+
+          for package in metadata["packages"]:
+              if package["id"] not in members:
+                  continue
+
+              for target in package["targets"]:
+                  if "bin" in target["kind"]:
+                      binaries.add(target["name"])
+
+          if not binaries:
+              print(
+                  "ERROR: No executable Cargo binary targets were found.",
+                  file=sys.stderr,
+              )
+              sys.exit(1)
+
+          print("\n".join(sorted(binaries)))
+          PY
+          )"
+
+          if [[ -z "$BIN_NAMES" ]]; then
+            echo "::error::No Cargo executables discovered."
+            exit 1
+          fi
+
+          echo "Detected executable targets:"
+          printf '%s\n' "$BIN_NAMES"
+
+          {
+            echo "names<<BIN_NAMES_EOF"
+            printf '%s\n' "$BIN_NAMES"
+            echo "BIN_NAMES_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      # --------------------------------------------------
+      # BUILD
+      # --------------------------------------------------
+
+      - name: Build release binaries
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          METHOD: ${{ matrix.method }}
+        run: |
+          set -euo pipefail
+
+          echo "Building target: $TARGET"
+          echo "Build method: $METHOD"
+
+          LOCK_ARGS=()
+
+          # Use the committed lockfile when available.
+          if [[ -f Cargo.lock ]]; then
+            LOCK_ARGS+=(--locked)
           else
-            cargo build --release --target "$TARGET"
+            echo "::warning::Cargo.lock not found. Dependencies will be resolved during this build."
           fi
 
-      # Package
-      - name: Package
+          if [[ "$METHOD" == "cross" ]]; then
+            cross build \
+              "${LOCK_ARGS[@]}" \
+              --release \
+              --target "$TARGET"
+          else
+            cargo build \
+              "${LOCK_ARGS[@]}" \
+              --release \
+              --target "$TARGET"
+          fi
+
+          echo "Build completed."
+
+      # --------------------------------------------------
+      # PACKAGE
+      # --------------------------------------------------
+
+      - name: Package release binaries
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+          BIN_NAMES: ${{ steps.binaries.outputs.names }}
+        run: |
+          set -euo pipefail
+
+          PACKAGE_DIR="dist/package"
+          mkdir -p "$PACKAGE_DIR"
+
+          # Windows executable extension.
+          EXE_EXT=""
+
+          if [[ "$TARGET" == *windows* ]]; then
+            EXE_EXT=".exe"
+          fi
+
+          echo "Packaging executables for $TARGET"
+
+          while IFS= read -r BIN_NAME; do
+            [[ -z "$BIN_NAME" ]] && continue
+
+            SOURCE="target/$TARGET/release/$BIN_NAME$EXE_EXT"
+            DESTINATION="$PACKAGE_DIR/$BIN_NAME$EXE_EXT"
+
+            if [[ ! -f "$SOURCE" ]]; then
+              echo "::error::Expected executable not found: $SOURCE"
+
+              echo "Release directory:"
+              ls -la "target/$TARGET/release/" || true
+
+              exit 1
+            fi
+
+            cp "$SOURCE" "$DESTINATION"
+
+            echo "Packaged: $BIN_NAME$EXE_EXT"
+
+          done <<< "$BIN_NAMES"
+
+          # Build information included in every archive.
+          {
+            echo "Project: stew dio"
+            echo "Target: $TARGET"
+            echo "Commit: $GITHUB_SHA"
+            echo "Ref: $GITHUB_REF"
+            echo "Rust: $(rustc --version)"
+          } > "$PACKAGE_DIR/BUILD-INFO.txt"
+
+          ARCHIVE="dist/stewdio-$TARGET.tar.gz"
+
+          tar -czf "$ARCHIVE" -C "$PACKAGE_DIR" .
+
+          if [[ ! -s "$ARCHIVE" ]]; then
+            echo "::error::Archive creation failed: $ARCHIVE"
+            exit 1
+          fi
+
+          echo "Created archive:"
+          ls -lh "$ARCHIVE"
+
+      # --------------------------------------------------
+      # UPLOAD BUILD ARTIFACT
+      # --------------------------------------------------
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: stew dio-${{ matrix.target }}
+          path: dist/stewdio-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+  # ======================================================
+  # RELEASE
+  # ======================================================
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    runs-on: ubuntu-24.04
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: stew dio-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify release artifacts
         shell: bash
         run: |
           set -euo pipefail
 
-          TARGET="${{ matrix.target }}"
-          NAME="stewdio-$TARGET"
+          mkdir -p dist
 
-          BIN="stewdio"
+          shopt -s nullglob
+          ARCHIVES=(dist/*.tar.gz)
 
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            BIN="stewdio.exe"
-          fi
-
-          mkdir -p "dist/$NAME"
-
-          SOURCE="target/$TARGET/release/$BIN"
-
-          if [ ! -f "$SOURCE" ]; then
-            echo "ERROR: Binary not found: $SOURCE"
+          if [[ ${#ARCHIVES[@]} -eq 0 ]]; then
+            echo "::error::No release archives were downloaded."
             exit 1
           fi
 
-          cp "$SOURCE" "dist/$NAME/"
+          echo "Release archives:"
+          ls -lh dist/*.tar.gz
 
-          if [ -f README.md ]; then
-            cp README.md "dist/$NAME/"
-          fi
+      - name: Generate SHA256 checksums
+        shell: bash
+        run: |
+          set -euo pipefail
 
           cd dist
 
-          if [ "${{ matrix.archive }}" = "zip" ]; then
-            7z a "$NAME.zip" "$NAME"
-          else
-            tar czf "$NAME.tar.gz" "$NAME"
-          fi
+          sha256sum *.tar.gz > SHA256SUMS.txt
 
-          echo "ASSET=dist/$NAME.${{ matrix.archive }}" >> "$GITHUB_ENV"
+          echo "Generated checksums:"
+          cat SHA256SUMS.txt
 
-      # Release upload
-      - name: Upload to release
-        if: github.event_name == 'release'
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          gh release upload \
-            "${{ github.event.release.tag_name }}" \
-            "$ASSET" \
-            --clobber
-
-      # Manual workflow artifacts
-      - name: Upload workflow artifact
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v4
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v3
         with:
-          name: stewdio-${{ matrix.target }}
-          path: ${{ env.ASSET }}
-          if-no-files-found: error
+          tag_name: ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/*.tar.gz
+            dist/SHA256SUMS.txt
