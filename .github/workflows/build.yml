@@ -17,72 +17,218 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
+
       - uses: Swatinem/rust-cache@v2
+
       - run: cargo test
 
   build:
     name: Build (${{ matrix.target }})
     needs: test
     runs-on: ${{ matrix.os }}
+
     strategy:
       fail-fast: false
       matrix:
         include:
+          # Linux
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            method: cross
             archive: tar.gz
+
+          - os: ubuntu-latest
+            target: i686-unknown-linux-gnu
+            method: cross
+            archive: tar.gz
+
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            method: cross
+            archive: tar.gz
+
+          - os: ubuntu-latest
+            target: armv7-unknown-linux-gnueabihf
+            method: cross
+            archive: tar.gz
+
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            method: cross
+            archive: tar.gz
+
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            method: cross
+            archive: tar.gz
+
+          # Windows
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            method: cargo
             archive: zip
+
+          - os: windows-latest
+            target: i686-pc-windows-msvc
+            method: cargo
+            archive: zip
+
+          - os: windows-latest
+            target: aarch64-pc-windows-msvc
+            method: cargo
+            archive: zip
+
+          # macOS
           - os: macos-latest
             target: aarch64-apple-darwin
+            method: cargo
             archive: tar.gz
+
           - os: macos-latest
             target: x86_64-apple-darwin
+            method: cargo
             archive: tar.gz
+
+          # Android
+          - os: ubuntu-latest
+            target: aarch64-linux-android
+            method: android
+            archive: tar.gz
+
+          - os: ubuntu-latest
+            target: armv7-linux-androideabi
+            method: android
+            archive: tar.gz
+
+          - os: ubuntu-latest
+            target: i686-linux-android
+            method: android
+            archive: tar.gz
+
+          - os: ubuntu-latest
+            target: x86_64-linux-android
+            method: android
+            archive: tar.gz
+
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      # Rust toolchain
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
 
-      - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+      # Cross compilation for Linux
+      - name: Install cross
+        if: matrix.method == 'cross'
+        run: cargo install cross --locked
 
+      # Android NDK
+      - name: Setup Android SDK
+        if: matrix.method == 'android'
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android NDK
+        if: matrix.method == 'android'
+        shell: bash
+        run: sdkmanager "ndk;27.2.12479018"
+
+      - name: Configure Android linker
+        if: matrix.method == 'android'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          NDK="$ANDROID_HOME/ndk/27.2.12479018"
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+
+          case "${{ matrix.target }}" in
+            aarch64-linux-android)
+              LINKER="aarch64-linux-android21-clang"
+              VAR="CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER"
+              ;;
+            armv7-linux-androideabi)
+              LINKER="armv7a-linux-androideabi19-clang"
+              VAR="CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER"
+              ;;
+            i686-linux-android)
+              LINKER="i686-linux-android19-clang"
+              VAR="CARGO_TARGET_I686_LINUX_ANDROID_LINKER"
+              ;;
+            x86_64-linux-android)
+              LINKER="x86_64-linux-android21-clang"
+              VAR="CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER"
+              ;;
+          esac
+
+          echo "$VAR=$TOOLCHAIN/$LINKER" >> "$GITHUB_ENV"
+
+      # Build
+      - name: Build
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${{ matrix.method }}" = "cross" ]; then
+            cross build --release --target "${{ matrix.target }}"
+          else
+            cargo build --release --target "${{ matrix.target }}"
+          fi
+
+      # Package
       - name: Package
         shell: bash
         run: |
           set -euo pipefail
-          name="stewdio-${{ matrix.target }}"
-          bin="stewdio"
-          if [ "${{ runner.os }}" = "Windows" ]; then bin="stewdio.exe"; fi
-          mkdir -p "dist/$name"
-          cp "target/${{ matrix.target }}/release/$bin" "dist/$name/"
-          cp README.md "dist/$name/"
-          cd dist
-          if [ "${{ matrix.archive }}" = "zip" ]; then
-            7z a "$name.zip" "$name" > /dev/null
-          else
-            tar czf "$name.tar.gz" "$name"
-          fi
-          echo "ASSET=dist/$name.${{ matrix.archive }}" >> "$GITHUB_ENV"
 
-      # Triggered by publishing a release: attach the archive to that release.
-      - name: Upload to release assets
+          TARGET="${{ matrix.target }}"
+          NAME="stewdio-$TARGET"
+
+          BIN="stewdio"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            BIN="stewdio.exe"
+          fi
+
+          mkdir -p "dist/$NAME"
+
+          cp "target/$TARGET/release/$BIN" "dist/$NAME/"
+
+          if [ -f README.md ]; then
+            cp README.md "dist/$NAME/"
+          fi
+
+          cd dist
+
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            7z a "$NAME.zip" "$NAME" > /dev/null
+          else
+            tar czf "$NAME.tar.gz" "$NAME"
+          fi
+
+          echo "ASSET=dist/$NAME.${{ matrix.archive }}" >> "$GITHUB_ENV"
+
+      # Release assets
+      - name: Upload to release
         if: github.event_name == 'release'
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}
-        run: gh release upload "${{ github.event.release.tag_name }}" "$ASSET" --clobber
+        run: |
+          gh release upload \
+            "${{ github.event.release.tag_name }}" \
+            "$ASSET" \
+            --clobber
 
-      # Triggered manually: keep it as a normal workflow artifact.
+      # Manual workflow artifacts
       - name: Upload workflow artifact
         if: github.event_name != 'release'
         uses: actions/upload-artifact@v4
