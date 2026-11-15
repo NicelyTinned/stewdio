@@ -115,6 +115,7 @@ jobs:
             archive: tar.gz
 
     steps:
+      # Checkout
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -134,7 +135,7 @@ jobs:
         if: matrix.method == 'cross'
         uses: taiki-e/install-action@cross
 
-      # Android SDK setup
+      # Android Java
       - name: Set up Java
         if: matrix.method == 'android'
         uses: actions/setup-java@v4
@@ -142,22 +143,48 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      # Android SDK
       - name: Setup Android SDK
         if: matrix.method == 'android'
         uses: android-actions/setup-android@v4
         with:
           packages: ''
 
+      # Install NDK
       - name: Install Android NDK
         if: matrix.method == 'android'
         shell: bash
         run: |
           set -euo pipefail
 
-          sdkmanager --install "ndk;27.2.12479018"
+          SDKMANAGER="$(command -v sdkmanager)"
 
-          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_ROOT=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          if [ -z "${ANDROID_SDK_ROOT:-}" ]; then
+            if [ -n "${ANDROID_HOME:-}" ]; then
+              SDK_ROOT="$ANDROID_HOME"
+            else
+              SDK_ROOT="$(dirname "$(dirname "$(dirname "$SDKMANAGER")")")"
+            fi
+          else
+            SDK_ROOT="$ANDROID_SDK_ROOT"
+          fi
+
+          echo "Android SDK: $SDK_ROOT"
+
+          sdkmanager --sdk_root="$SDK_ROOT" \
+            --install "ndk;27.2.12479018"
+
+          NDK="$SDK_ROOT/ndk/27.2.12479018"
+
+          if [ ! -d "$NDK" ]; then
+            echo "ERROR: Android NDK installation failed"
+            exit 1
+          fi
+
+          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_ROOT=$NDK" >> "$GITHUB_ENV"
 
       # Android linker configuration
       - name: Configure Android linker
@@ -166,32 +193,46 @@ jobs:
         run: |
           set -euo pipefail
 
-          NDK="$ANDROID_HOME/ndk/27.2.12479018"
-          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          NDK="$ANDROID_NDK_HOME"
 
+          TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+          BIN="$TOOLCHAIN/bin"
+
+          CLANG="$BIN/clang"
+
+          if [ ! -x "$CLANG" ]; then
+            echo "ERROR: NDK Clang compiler not found!"
+            echo "Expected: $CLANG"
+            echo "Available toolchains:"
+            find "$NDK/toolchains/llvm/prebuilt" -maxdepth 2 -type d || true
+            exit 1
+          fi
+
+          # Select Android architecture and minimum API.
           case "${{ matrix.target }}" in
+
             aarch64-linux-android)
-              LINKER="aarch64-linux-android-clang"
-              VAR="CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER"
+              TRIPLE="aarch64-linux-android"
               API=21
+              VAR="CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER"
               ;;
 
             armv7-linux-androideabi)
-              LINKER="armv7a-linux-androideabi-clang"
-              VAR="CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER"
+              TRIPLE="armv7a-linux-androideabi"
               API=19
+              VAR="CARGO_TARGET_ARMV7_LINUX_ANDROIDEABI_LINKER"
               ;;
 
             i686-linux-android)
-              LINKER="i686-linux-android-clang"
-              VAR="CARGO_TARGET_I686_LINUX_ANDROID_LINKER"
+              TRIPLE="i686-linux-android"
               API=19
+              VAR="CARGO_TARGET_I686_LINUX_ANDROID_LINKER"
               ;;
 
             x86_64-linux-android)
-              LINKER="x86_64-linux-android-clang"
-              VAR="CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER"
+              TRIPLE="x86_64-linux-android"
               API=21
+              VAR="CARGO_TARGET_X86_64_LINUX_ANDROID_LINKER"
               ;;
 
             *)
@@ -200,19 +241,27 @@ jobs:
               ;;
           esac
 
-          if [ ! -x "$TOOLCHAIN/$LINKER" ]; then
-            echo "ERROR: Linker not found: $TOOLCHAIN/$LINKER"
-            echo "Available Android linkers:"
-            ls "$TOOLCHAIN"/*android*clang* || true
-            exit 1
-          fi
+          # Create a linker wrapper using NDK's regular Clang.
+          WRAPPER="$RUNNER_TEMP/android-${{ matrix.target }}-linker"
 
-          echo "$VAR=$TOOLCHAIN/$LINKER" >> "$GITHUB_ENV"
+          cat > "$WRAPPER" <<EOF
+          #!/usr/bin/env bash
+          set -euo pipefail
+          exec "$CLANG" --target="$TRIPLE$API" "\$@"
+          EOF
 
-          echo "ANDROID_API=$API" >> "$GITHUB_ENV"
+          chmod +x "$WRAPPER"
 
-          echo "Configured linker: $TOOLCHAIN/$LINKER"
+          # Verify compiler and wrapper.
+          "$CLANG" --version
+          "$WRAPPER" --version
+
+          # Export Cargo linker configuration.
+          echo "$VAR=$WRAPPER" >> "$GITHUB_ENV"
+
+          echo "Android target: $TRIPLE"
           echo "Android API: $API"
+          echo "Android linker: $WRAPPER"
 
       # Build
       - name: Build
@@ -268,7 +317,7 @@ jobs:
 
           echo "ASSET=dist/$NAME.${{ matrix.archive }}" >> "$GITHUB_ENV"
 
-      # Release upload
+      # Upload release assets
       - name: Upload to release
         if: github.event_name == 'release'
         shell: bash
@@ -281,7 +330,7 @@ jobs:
             "$ASSET" \
             --clobber
 
-      # Manual workflow artifact
+      # Upload manual workflow artifacts
       - name: Upload workflow artifact
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
