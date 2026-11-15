@@ -17,11 +17,14 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
 
       - name: Run tests
         run: cargo test
@@ -150,26 +153,19 @@ jobs:
         with:
           packages: ''
 
-      # Install NDK
+      # Android NDK
       - name: Install Android NDK
         if: matrix.method == 'android'
         shell: bash
         run: |
           set -euo pipefail
 
-          SDKMANAGER="$(command -v sdkmanager)"
+          SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
 
-          if [ -z "${ANDROID_SDK_ROOT:-}" ]; then
-            if [ -n "${ANDROID_HOME:-}" ]; then
-              SDK_ROOT="$ANDROID_HOME"
-            else
-              SDK_ROOT="$(dirname "$(dirname "$(dirname "$SDKMANAGER")")")"
-            fi
-          else
-            SDK_ROOT="$ANDROID_SDK_ROOT"
+          if [ -z "$SDK_ROOT" ]; then
+            echo "ERROR: Android SDK root not found"
+            exit 1
           fi
-
-          echo "Android SDK: $SDK_ROOT"
 
           sdkmanager --sdk_root="$SDK_ROOT" \
             --install "ndk;27.2.12479018"
@@ -186,7 +182,7 @@ jobs:
           echo "ANDROID_NDK_HOME=$NDK" >> "$GITHUB_ENV"
           echo "ANDROID_NDK_ROOT=$NDK" >> "$GITHUB_ENV"
 
-      # Android linker configuration
+      # Android linker
       - name: Configure Android linker
         if: matrix.method == 'android'
         shell: bash
@@ -197,18 +193,8 @@ jobs:
 
           TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
           BIN="$TOOLCHAIN/bin"
+          SYSROOT="$TOOLCHAIN/sysroot"
 
-          CLANG="$BIN/clang"
-
-          if [ ! -x "$CLANG" ]; then
-            echo "ERROR: NDK Clang compiler not found!"
-            echo "Expected: $CLANG"
-            echo "Available toolchains:"
-            find "$NDK/toolchains/llvm/prebuilt" -maxdepth 2 -type d || true
-            exit 1
-          fi
-
-          # Select Android architecture and minimum API.
           case "${{ matrix.target }}" in
 
             aarch64-linux-android)
@@ -241,27 +227,58 @@ jobs:
               ;;
           esac
 
-          # Create a linker wrapper using NDK's regular Clang.
+          CLANG="$BIN/clang"
           WRAPPER="$RUNNER_TEMP/android-${{ matrix.target }}-linker"
 
+          if [ ! -x "$CLANG" ]; then
+            echo "ERROR: NDK Clang not found: $CLANG"
+            exit 1
+          fi
+
+          if [ ! -d "$SYSROOT" ]; then
+            echo "ERROR: Android sysroot not found: $SYSROOT"
+            exit 1
+          fi
+
+          # Create linker wrapper
           cat > "$WRAPPER" <<EOF
           #!/usr/bin/env bash
           set -euo pipefail
-          exec "$CLANG" --target="$TRIPLE$API" "\$@"
+
+          exec "$CLANG" \
+            --target="$TRIPLE$API" \
+            --sysroot="$SYSROOT" \
+            -B"$BIN" \
+            -fuse-ld=lld \
+            "\$@"
           EOF
 
           chmod +x "$WRAPPER"
 
-          # Verify compiler and wrapper.
-          "$CLANG" --version
+          # Verify compiler
+          echo "Checking Android linker..."
           "$WRAPPER" --version
 
-          # Export Cargo linker configuration.
+          # Verify Android startup objects and system libraries
+          CRT="$("$WRAPPER" -print-file-name=crtbegin_dynamic.o)"
+          LOG="$("$WRAPPER" -print-file-name=liblog.so)"
+
+          echo "CRT: $CRT"
+          echo "liblog: $LOG"
+
+          if [ ! -f "$CRT" ]; then
+            echo "ERROR: crtbegin_dynamic.o not found"
+            exit 1
+          fi
+
+          if [ ! -f "$LOG" ]; then
+            echo "ERROR: liblog.so not found"
+            exit 1
+          fi
+
           echo "$VAR=$WRAPPER" >> "$GITHUB_ENV"
 
-          echo "Android target: $TRIPLE"
-          echo "Android API: $API"
-          echo "Android linker: $WRAPPER"
+          echo "Android linker configured successfully"
 
       # Build
       - name: Build
@@ -317,7 +334,7 @@ jobs:
 
           echo "ASSET=dist/$NAME.${{ matrix.archive }}" >> "$GITHUB_ENV"
 
-      # Upload release assets
+      # Release upload
       - name: Upload to release
         if: github.event_name == 'release'
         shell: bash
@@ -330,7 +347,7 @@ jobs:
             "$ASSET" \
             --clobber
 
-      # Upload manual workflow artifacts
+      # Manual workflow artifacts
       - name: Upload workflow artifact
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4
@@ -338,4 +355,3 @@ jobs:
           name: stewdio-${{ matrix.target }}
           path: ${{ env.ASSET }}
           if-no-files-found: error
-
