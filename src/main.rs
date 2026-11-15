@@ -67,7 +67,7 @@ fn main() {
     let cli = Cli::parse();
     // Deeply nested Roblox hierarchies are processed recursively; give the worker a big stack.
     let handle = std::thread::Builder::new()
-        .stack_size(128 * 1024 * 1024)
+        .stack_size(64 * 1024 * 1024)
         .spawn(move || run(cli))
         .expect("failed to spawn worker thread");
     let code = match handle.join() {
