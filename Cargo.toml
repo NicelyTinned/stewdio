@@ -1,0 +1,16 @@
+[package]
+name = "stewdio"
+version = "0.1.0"
+edition = "2021"
+description = "CLI-based Roblox place file decompiler, project manager, and compiler"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
