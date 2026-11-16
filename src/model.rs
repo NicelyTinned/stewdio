@@ -219,3 +219,37 @@ pub fn hjson_to_prop(name: &str, v: &Value) -> Result<Property, String> {
         }
     }
 }
+
+/// Add a decoded property to an instance, routing Name / Source / Tags to their dedicated fields.
+pub fn absorb(inst: &mut Instance, p: Property) {
+    if p.name == "Name" && p.ty == "string" {
+        if let PropValue::Text(t) = p.value {
+            inst.name = t;
+        }
+        return;
+    }
+    if p.name == "Source"
+        && is_script_class(&inst.class)
+        && (p.ty == "ProtectedString" || p.ty == "string")
+    {
+        if let PropValue::Text(t) = p.value {
+            inst.source = Some(t);
+        }
+        return;
+    }
+    if p.name == "Tags" && p.ty == "BinaryString" {
+        if let PropValue::Text(t) = &p.value {
+            if let Some(bytes) = crate::util::base64_decode(t.trim()) {
+                if let Ok(s) = String::from_utf8(bytes) {
+                    inst.tags = s
+                        .split('\0')
+                        .filter(|x| !x.is_empty())
+                        .map(|x| x.to_string())
+                        .collect();
+                    return;
+                }
+            }
+        }
+    }
+    inst.properties.push(p);
+}

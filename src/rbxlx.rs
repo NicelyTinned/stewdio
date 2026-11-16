@@ -13,6 +13,7 @@ pub struct Decoded {
 struct Ctx {
     counter: usize,
     refs: HashMap<String, String>,
+    shared: HashMap<String, String>,
     warnings: Vec<String>,
 }
 
@@ -21,18 +22,28 @@ pub fn decode(text: &str) -> Result<Decoded, String> {
     if root.name != "roblox" {
         return Err("root element is not <roblox>".to_string());
     }
-    let mut ctx = Ctx { counter: 0, refs: HashMap::new(), warnings: Vec::new() };
+    let mut ctx = Ctx {
+        counter: 0,
+        refs: HashMap::new(),
+        shared: HashMap::new(),
+        warnings: Vec::new(),
+    };
+    // SharedStrings live at the end of the file but are needed while reading properties.
+    for el in root.elements() {
+        if el.name == "SharedStrings" {
+            for s in el.elements() {
+                if let Some(k) = s.attr("md5") {
+                    let data: String = s.text().chars().filter(|c| !c.is_whitespace()).collect();
+                    ctx.shared.insert(k.to_string(), data);
+                }
+            }
+        }
+    }
     let mut roots = Vec::new();
     for el in root.elements() {
-        match el.name.as_str() {
-            "Item" => {
-                let inst = ctx.item(el);
-                roots.push(inst);
-            }
-            "SharedStrings" => ctx
-                .warnings
-                .push("<SharedStrings> are not preserved in v0.1".to_string()),
-            _ => {}
+        if el.name == "Item" {
+            let inst = ctx.item(el);
+            roots.push(inst);
         }
     }
     for r in roots.iter_mut() {
@@ -82,30 +93,24 @@ impl Ctx {
                 }
             };
             let ty = p.name.clone();
-            if pname == "Name" && ty == "string" {
-                inst.name = p.text();
-                continue;
-            }
-            if pname == "Source"
-                && is_script_class(&inst.class)
-                && (ty == "ProtectedString" || ty == "string")
-            {
-                inst.source = Some(p.text());
-                continue;
-            }
-            if pname == "Tags" && ty == "BinaryString" {
-                if let Some(bytes) = util::base64_decode(p.text().trim()) {
-                    if let Ok(s) = String::from_utf8(bytes) {
-                        inst.tags = s
-                            .split('\0')
-                            .filter(|t| !t.is_empty())
-                            .map(|t| t.to_string())
-                            .collect();
-                        continue;
+            if ty == "SharedString" {
+                let key = p.text().trim().to_string();
+                match self.shared.get(&key) {
+                    Some(d) => {
+                        let value = PropValue::Text(d.clone());
+                        inst.properties.push(Property { name: pname, ty, value });
+                    }
+                    None => {
+                        self.warnings.push(format!(
+                            "{}: SharedString '{}' not found in <SharedStrings>; property skipped",
+                            inst.name, pname
+                        ));
                     }
                 }
+                continue;
             }
-            inst.properties.push(Property { name: pname, ty, value: element_value(p) });
+            let value = element_value(p);
+            absorb(inst, Property { name: pname, ty, value });
         }
     }
 
@@ -151,6 +156,7 @@ pub fn encode(roots: &[Instance]) -> Result<String, String> {
     for r in roots {
         assign(r, &mut ids, &mut n);
     }
+    let mut shared: Vec<(String, String)> = Vec::new();
     let mut root = Element::new("roblox")
         .with_attr("xmlns:xmime", "http://www.w3.org/2005/05/xmlmime")
         .with_attr("xmlns:xsi", "http://www.w3.org/2001/XMLSchema-instance")
@@ -160,12 +166,25 @@ pub fn encode(roots: &[Instance]) -> Result<String, String> {
     root.children.push(Node::Element(Element::leaf("External", "null")));
     root.children.push(Node::Element(Element::leaf("External", "nil")));
     for r in roots {
-        root.children.push(Node::Element(encode_item(r, &ids)?));
+        root.children.push(Node::Element(encode_item(r, &ids, &mut shared)?));
+    }
+    if !shared.is_empty() {
+        let mut ss = Element::new("SharedStrings");
+        for (k, d) in shared {
+            let mut e = Element::new("SharedString").with_attr("md5", &k);
+            e.children.push(Node::Text(d));
+            ss.children.push(Node::Element(e));
+        }
+        root.children.push(Node::Element(ss));
     }
     Ok(root.to_document())
 }
 
-fn encode_item(i: &Instance, ids: &HashMap<String, String>) -> Result<Element, String> {
+fn encode_item(
+    i: &Instance,
+    ids: &HashMap<String, String>,
+    shared: &mut Vec<(String, String)>,
+) -> Result<Element, String> {
     let referent = ids.get(&i.id).cloned().unwrap_or_default();
     let mut el = Element::new("Item").with_attr("class", &i.class).with_attr("referent", &referent);
     let mut props = Element::new("Properties");
@@ -173,7 +192,7 @@ fn encode_item(i: &Instance, ids: &HashMap<String, String>) -> Result<Element, S
         .children
         .push(Node::Element(Element::leaf("string", &i.name).with_attr("name", "Name")));
     for p in &i.properties {
-        props.children.push(Node::Element(encode_prop(i, p, ids)?));
+        props.children.push(Node::Element(encode_prop(i, p, ids, shared)?));
     }
     if let Some(src) = &i.source {
         let mut s = Element::new("ProtectedString").with_attr("name", "Source");
@@ -188,12 +207,17 @@ fn encode_item(i: &Instance, ids: &HashMap<String, String>) -> Result<Element, S
     }
     el.children.push(Node::Element(props));
     for c in &i.children {
-        el.children.push(Node::Element(encode_item(c, ids)?));
+        el.children.push(Node::Element(encode_item(c, ids, shared)?));
     }
     Ok(el)
 }
 
-fn encode_prop(inst: &Instance, p: &Property, ids: &HashMap<String, String>) -> Result<Element, String> {
+fn encode_prop(
+    inst: &Instance,
+    p: &Property,
+    ids: &HashMap<String, String>,
+    shared: &mut Vec<(String, String)>,
+) -> Result<Element, String> {
     let mut el = Element::new(&p.ty).with_attr("name", &p.name);
     match &p.value {
         PropValue::Text(t) => {
@@ -207,6 +231,14 @@ fn encode_prop(inst: &Instance, p: &Property, ids: &HashMap<String, String>) -> 
                         ))
                     }
                 }
+            } else if p.ty == "SharedString" {
+                let data: String = t.chars().filter(|c| !c.is_whitespace()).collect();
+                let bytes = util::base64_decode(&data).unwrap_or_default();
+                let key = util::base64_encode(&util::hash16(&bytes));
+                if !shared.iter().any(|(k, _)| k == &key) {
+                    shared.push((key.clone(), data));
+                }
+                key
             } else {
                 t.clone()
             };

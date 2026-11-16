@@ -6,7 +6,7 @@ use crate::error::*;
 use crate::fsproj::{self, WriteOptions};
 use crate::model::*;
 use crate::project::{self, Project};
-use crate::{rbxlx, util, validate};
+use crate::{rbxl, rbxlx, util, validate};
 
 fn say(quiet: bool, msg: &str) {
     if !quiet {
@@ -222,7 +222,7 @@ pub struct CompileArgs {
     /// Compile into .rbxlx format
     #[arg(long, conflicts_with = "binary")]
     pub xml: bool,
-    /// Compile into .rbxl format (not available until v0.2)
+    /// Compile into .rbxl format
     #[arg(long)]
     pub binary: bool,
     /// Specify the output file
@@ -252,12 +252,6 @@ pub fn compile(a: CompileArgs) -> CliResult<()> {
         None
     };
     let use_xml = xml_override.unwrap_or(project.file.compiler.format == "xml");
-    if !use_xml {
-        return Err(CliError::new(
-            UNSUPPORTED,
-            "Binary (.rbxl) output arrives in v0.2. Use --xml or set compiler.format = \"xml\" in Project.toml",
-        ));
-    }
     let q = a.quiet;
     say(q, "[Stewdio] Loading project...");
     let loaded = fsproj::load(&project.root);
@@ -280,22 +274,41 @@ pub fn compile(a: CompileArgs) -> CliResult<()> {
             format!("Project validation failed with {} error(s)", report.errors.len() + release_failures),
         ));
     }
+    let mut warnings = report.warnings.clone();
+    say(q, "[Stewdio] Building DataModel...");
+    let bytes: Vec<u8> = if use_xml {
+        say(q, "[Stewdio] Serializing XML output...");
+        rbxlx::encode(&loaded.roots)
+            .map_err(|e| CliError::new(COMPILE, e))?
+            .into_bytes()
+    } else {
+        say(q, "[Stewdio] Serializing binary output...");
+        let enc = rbxl::encode(&loaded.roots).map_err(|e| CliError::new(COMPILE, e))?;
+        warnings.extend(enc.warnings);
+        enc.bytes
+    };
+    if release_failures == 0 && a.release && !warnings.is_empty() {
+        for w in &warnings {
+            eprintln!("[Error] (release) {w}");
+        }
+        return Err(CliError::new(
+            COMPILE,
+            format!("Release build failed with {} warning(s)", warnings.len()),
+        ));
+    }
     if a.verbose && !q {
-        for w in &report.warnings {
+        for w in &warnings {
             eprintln!("[Warning] {w}");
         }
         println!("[Stewdio] Paths excluded by .stewdioignore: {}", loaded.ignored);
     }
-    say(q, "[Stewdio] Building DataModel...");
-    say(q, "[Stewdio] Serializing XML output...");
-    let xml = rbxlx::encode(&loaded.roots).map_err(|e| CliError::new(COMPILE, e))?;
     let out = a.output.clone().unwrap_or_else(|| project.output_path(xml_override));
     if let Some(parent) = out.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
         }
     }
-    fs::write(&out, xml)?;
+    fs::write(&out, bytes)?;
     if !q {
         let instances: usize = loaded.roots.iter().map(|r| r.count()).sum();
         let scripts: usize = loaded.roots.iter().map(|r| r.script_count()).sum();
@@ -303,7 +316,7 @@ pub fn compile(a: CompileArgs) -> CliResult<()> {
         println!("Output: {}", out.display());
         println!("Instances: {instances}");
         println!("Scripts: {scripts}");
-        println!("Warnings: {}", report.warnings.len());
+        println!("Warnings: {}", warnings.len());
     }
     Ok(())
 }
@@ -312,7 +325,7 @@ pub fn compile(a: CompileArgs) -> CliResult<()> {
 
 #[derive(Args)]
 pub struct DecompileArgs {
-    /// Roblox place file (.rbxlx; .rbxl arrives in v0.2)
+    /// Roblox place file (.rbxl or .rbxlx)
     pub input: PathBuf,
     /// Specify the output directory
     #[arg(long)]
@@ -343,20 +356,14 @@ pub fn decompile(a: DecompileArgs) -> CliResult<()> {
     }
     println!("[Stewdio] Reading {}...", a.input.display());
     let data = fs::read(&a.input)?;
-    if data.starts_with(b"<roblox!") {
-        println!("[Stewdio] Detecting binary format...");
-        return Err(CliError::new(
-            UNSUPPORTED,
-            "Binary .rbxl parsing arrives in v0.2. Re-save the place as .rbxlx for now",
-        ));
+    let is_binary = data.starts_with(b"<roblox!");
+    if !is_binary {
+        let head = String::from_utf8_lossy(&data[..data.len().min(64)]).to_string();
+        let head = head.trim_start_matches('\u{feff}').trim_start().to_string();
+        if !(head.starts_with("<roblox") || head.starts_with("<?xml")) {
+            return Err(CliError::new(UNSUPPORTED, "Unsupported input file format"));
+        }
     }
-    let head = String::from_utf8_lossy(&data[..data.len().min(64)]).to_string();
-    let head = head.trim_start_matches('\u{feff}').trim_start().to_string();
-    if !(head.starts_with("<roblox") || head.starts_with("<?xml")) {
-        return Err(CliError::new(UNSUPPORTED, "Unsupported input file format"));
-    }
-    println!("[Stewdio] Detecting XML format...");
-    let text = String::from_utf8(data).map_err(|_| CliError::new(PARSE, "Input file is not valid UTF-8"))?;
 
     let stem = a
         .input
@@ -389,8 +396,17 @@ pub fn decompile(a: DecompileArgs) -> CliResult<()> {
         fs::remove_dir_all(&out)?;
     }
 
-    println!("[Stewdio] Parsing XML...");
-    let decoded = rbxlx::decode(&text).map_err(|e| CliError::new(PARSE, e))?;
+    let decoded = if is_binary {
+        println!("[Stewdio] Detecting binary format...");
+        println!("[Stewdio] Decompressing chunks...");
+        rbxl::decode(&data).map_err(|e| CliError::new(PARSE, e))?
+    } else {
+        println!("[Stewdio] Detecting XML format...");
+        println!("[Stewdio] Parsing XML...");
+        let text = String::from_utf8(data)
+            .map_err(|_| CliError::new(PARSE, "Input file is not valid UTF-8"))?;
+        rbxlx::decode(&text).map_err(|e| CliError::new(PARSE, e))?
+    };
     println!("[Stewdio] Reconstructing instances...");
     println!("[Stewdio] Extracting properties...");
     println!("[Stewdio] Extracting scripts...");

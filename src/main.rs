@@ -5,6 +5,8 @@ mod hjson;
 mod ignore;
 mod model;
 mod project;
+mod lz4;
+mod rbxl;
 mod rbxlx;
 mod util;
 mod validate;

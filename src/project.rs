@@ -69,8 +69,7 @@ pub struct CompilerSection {
 
 impl Default for CompilerSection {
     fn default() -> Self {
-        // v0.1 only ships the XML compiler, so XML is the default here.
-        CompilerSection { format: "xml".to_string(), output: None, preserve_unknown_properties: true }
+        CompilerSection { format: "binary".to_string(), output: None, preserve_unknown_properties: true }
     }
 }
 
@@ -182,8 +181,8 @@ type = \"{kind}\"
 # place_id = 987654321
 
 [compiler]
-format = \"xml\"
-output = \"build/{file}.rbxlx\"
+format = \"binary\"
+output = \"build/{file}.rbxl\"
 preserve_unknown_properties = true
 
 [decompiler]

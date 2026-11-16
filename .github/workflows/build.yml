@@ -29,30 +29,30 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # ---- Linux (native) ----
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-gnu,        archive: tar.gz, cross: false }
-          # ---- Linux (via cross) ----
-          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl,       archive: tar.gz, cross: true }
-          - { os: ubuntu-latest, target: aarch64-unknown-linux-gnu,       archive: tar.gz, cross: true }
-          - { os: ubuntu-latest, target: aarch64-unknown-linux-musl,      archive: tar.gz, cross: true }
-          - { os: ubuntu-latest, target: armv7-unknown-linux-gnueabihf,   archive: tar.gz, cross: true }
-          - { os: ubuntu-latest, target: armv7-unknown-linux-musleabihf,  archive: tar.gz, cross: true }
-          - { os: ubuntu-latest, target: i686-unknown-linux-gnu,          archive: tar.gz, cross: true }
-          - { os: ubuntu-latest, target: riscv64gc-unknown-linux-gnu,     archive: tar.gz, cross: true }
-          # ---- Android (via cross; runs in Termux / adb shell) ----
-          - { os: ubuntu-latest, target: armv7-linux-androideabi,         archive: tar.gz, cross: true }
-          - { os: ubuntu-latest, target: aarch64-linux-android,           archive: tar.gz, cross: true }
-          - { os: ubuntu-latest, target: x86_64-linux-android,            archive: tar.gz, cross: true }
-          - { os: ubuntu-latest, target: i686-linux-android,              archive: tar.gz, cross: true }
+          # kind: cargo = native build, cross = `cross` docker build, ndk = cargo-ndk with the runner's Android NDK
+          # ---- Linux ----
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-gnu,       archive: tar.gz, kind: cargo }
+          - { os: ubuntu-latest,  target: x86_64-unknown-linux-musl,      archive: tar.gz, kind: cross }
+          - { os: ubuntu-latest,  target: aarch64-unknown-linux-gnu,      archive: tar.gz, kind: cross }
+          - { os: ubuntu-latest,  target: aarch64-unknown-linux-musl,     archive: tar.gz, kind: cross }
+          - { os: ubuntu-latest,  target: armv7-unknown-linux-gnueabihf,  archive: tar.gz, kind: cross }
+          - { os: ubuntu-latest,  target: armv7-unknown-linux-musleabihf, archive: tar.gz, kind: cross }
+          - { os: ubuntu-latest,  target: i686-unknown-linux-gnu,         archive: tar.gz, kind: cross }
+          - { os: ubuntu-latest,  target: riscv64gc-unknown-linux-gnu,    archive: tar.gz, kind: cross }
+          # ---- Android (runs in Termux / adb shell) ----
+          - { os: ubuntu-latest,  target: armv7-linux-androideabi,        archive: tar.gz, kind: ndk, abi: armeabi-v7a }
+          - { os: ubuntu-latest,  target: aarch64-linux-android,          archive: tar.gz, kind: ndk, abi: arm64-v8a }
+          - { os: ubuntu-latest,  target: x86_64-linux-android,           archive: tar.gz, kind: ndk, abi: x86_64 }
+          - { os: ubuntu-latest,  target: i686-linux-android,             archive: tar.gz, kind: ndk, abi: x86 }
           # ---- Windows ----
-          - { os: windows-latest, target: x86_64-pc-windows-msvc,         archive: zip,    cross: false }
-          - { os: windows-latest, target: aarch64-pc-windows-msvc,        archive: zip,    cross: false }
-          - { os: windows-latest, target: i686-pc-windows-msvc,           archive: zip,    cross: false }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc,         archive: zip,    kind: cargo }
+          - { os: windows-latest, target: aarch64-pc-windows-msvc,        archive: zip,    kind: cargo }
+          - { os: windows-latest, target: i686-pc-windows-msvc,           archive: zip,    kind: cargo }
           # ---- macOS ----
-          - { os: macos-latest,   target: aarch64-apple-darwin,           archive: tar.gz, cross: false }
-          - { os: macos-latest,   target: x86_64-apple-darwin,            archive: tar.gz, cross: false }
-          # ---- FreeBSD (via cross) ----
-          - { os: ubuntu-latest, target: x86_64-unknown-freebsd,          archive: tar.gz, cross: true }
+          - { os: macos-latest,   target: aarch64-apple-darwin,           archive: tar.gz, kind: cargo }
+          - { os: macos-latest,   target: x86_64-apple-darwin,            archive: tar.gz, kind: cargo }
+          # ---- FreeBSD ----
+          - { os: ubuntu-latest,  target: x86_64-unknown-freebsd,         archive: tar.gz, kind: cross }
     steps:
       - uses: actions/checkout@v4
 
@@ -65,18 +65,28 @@ jobs:
           key: ${{ matrix.target }}
 
       - name: Install cross
-        if: matrix.cross
+        if: matrix.kind == 'cross'
         uses: taiki-e/install-action@v2
         with:
           tool: cross
 
       - name: Build (cargo)
-        if: ${{ !matrix.cross }}
+        if: matrix.kind == 'cargo'
         run: cargo build --release --target ${{ matrix.target }}
 
       - name: Build (cross)
-        if: matrix.cross
+        if: matrix.kind == 'cross'
         run: cross build --release --target ${{ matrix.target }}
+
+      # cross's Android image ships an old NDK without libunwind, so use the runner's NDK instead.
+      - name: Build (Android NDK)
+        if: matrix.kind == 'ndk'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export ANDROID_NDK_HOME="${ANDROID_NDK_LATEST_HOME:-$ANDROID_NDK_ROOT}"
+          cargo install cargo-ndk --locked
+          cargo ndk --platform 24 -t ${{ matrix.abi }} build --release
 
       - name: Package
         shell: bash

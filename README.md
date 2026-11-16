@@ -1,19 +1,26 @@
-# Stewdio v0.1
+# Stewdio v0.2
 
 A standalone Roblox place file toolkit: **decompile → edit → compile**.
 
-## Implemented in v0.1
+## Implemented
 
 | Command | Status |
 |---|---|
 | `new`, `init` | Done (`--model` arrives v0.3) |
-| `decompile <file.rbxlx>` | Done (binary `.rbxl` arrives v0.2) |
-| `compile` | Done, XML only (`--xml`; binary arrives v0.2) |
+| `decompile <file.rbxl|.rbxlx>` | Done (binary and XML) |
+| `compile` | Done (`--binary` default, `--xml`) |
 | `validate`, `info`, `version`, `help` | Done |
 | `config`, `auth`, `upload` | Stubs (v0.4+) |
 
-Defaults differ slightly from the full spec because only XML exists in v0.1:
-new projects get `compiler.format = "xml"` and output `build/<name>.rbxlx`.
+### v0.2 additions
+- Binary `.rbxl` parser and serializer (LZ4-compressed chunks: META, SSTR, INST, PROP, PRNT, END).
+- Property preservation for: String/ProtectedString/BinaryString/Content, bool, int, float, double,
+  int64, enum (token), UDim, UDim2, Ray, Faces, Axes, BrickColor, Color3, Color3uint8, Vector2,
+  Vector3, Vector3int16, CFrame, NumberSequence, ColorSequence, NumberRange, Rect, PhysicalProperties,
+  SharedString and Ref.
+- Reference preservation: every instance gets a stable `$id`; `Ref` properties point at `$id`s and are
+  re-linked on compile in either format. SharedStrings are now preserved in XML too.
+- New projects default to `compiler.format = "binary"` and `build/<name>.rbxl`.
 
 ## Project layout
 
@@ -27,10 +34,17 @@ new projects get `compiler.format = "xml"` and output `build/<name>.rbxlx`.
 - Untyped values are inferred when compiling (`{X,Y,Z}` → Vector3, `{R,G,B}` → Color3,
   integers → int, decimals → float).
 
-## Known v0.1 limitations
+## Known limitations
 
-- Attributes (`AttributesSerialize`) are preserved as a raw `BinaryString` property, not decoded.
-- `<SharedStrings>` and `<Meta>` entries are not preserved.
+- Binary property types not listed above (e.g. Font, UniqueId, OptionalCFrame, SecurityCapabilities)
+  are skipped with a warning on decompile; XML-only types are skipped with a warning in binary output.
+- Binary string properties are typed by name (Source → ProtectedString, a list of known asset
+  properties → Content, a list of known blobs → BinaryString); other strings become `string`.
+  Compiling back to binary is lossless; compiling a binary-origin project to XML may mistype
+  unlisted Content properties.
+- SharedString keys use a Stewdio content hash instead of MD5.
+- Attributes (`AttributesSerialize`) are preserved as a raw `BinaryString`, not decoded.
+- Instances of one class with different property sets are written as separate INST groups.
 - Sibling order is not preserved (children load alphabetically).
 
 ## Build

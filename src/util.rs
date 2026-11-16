@@ -150,3 +150,20 @@ pub fn sanitize_name(name: &str) -> String {
     }
     s
 }
+
+/// Deterministic 128-bit content hash (used as the SharedString key).
+pub fn hash16(data: &[u8]) -> [u8; 16] {
+    let mut a: u64 = 0xcbf29ce484222325;
+    let mut b: u64 = 0x84222325cbf29ce4;
+    for &x in data {
+        a ^= x as u64;
+        a = a.wrapping_mul(0x100000001b3);
+        b = b.wrapping_add(x as u64).rotate_left(5) ^ a;
+        b = b.wrapping_mul(0x9E3779B97F4A7C15);
+    }
+    a ^= data.len() as u64;
+    let mut o = [0u8; 16];
+    o[..8].copy_from_slice(&a.to_le_bytes());
+    o[8..].copy_from_slice(&b.to_le_bytes());
+    o
+}
