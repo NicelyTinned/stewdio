@@ -1,58 +1,77 @@
-# Stewdio v0.2
+# Stewdio v0.4
 
-A standalone Roblox place file toolkit: **decompile → edit → compile**.
+A standalone Roblox place file toolkit: **decompile → edit → compile → upload**.
+No Roblox Studio required.
 
-## Implemented
+## Commands
 
-| Command | Status |
+| Command | What it does |
 |---|---|
-| `new`, `init` | Done (`--model` arrives v0.3) |
-| `decompile <file.rbxl|.rbxlx>` | Done (binary and XML) |
-| `compile` | Done (`--binary` default, `--xml`) |
-| `validate`, `info`, `version`, `help` | Done |
-| `config`, `auth`, `upload` | Stubs (v0.4+) |
+| `new`, `init` | Create / initialize a place or `--model` project |
+| `decompile <file>` | `.rbxl`, `.rbxlx`, `.rbxm`, `.rbxmx` → project directory |
+| `compile` | Project → `.rbxl` / `.rbxlx` (places) or `.rbxm` / `.rbxmx` (models) |
+| `validate`, `info`, `version`, `help` | Project checks and information |
+| `api update` / `api status` | Download / inspect the Roblox API database |
+| `config` | Global settings (`get`, `set`, `list`, `reset`, or interactive) |
+| `auth` | `login`, `logout`, `status`, `list`, `use <profile>` |
+| `upload` | Upload a place with Open Cloud (saved by default, `--publish` to go live) |
 
-### v0.2 additions
-- Binary `.rbxl` parser and serializer (LZ4-compressed chunks: META, SSTR, INST, PROP, PRNT, END).
-- Property preservation for: String/ProtectedString/BinaryString/Content, bool, int, float, double,
-  int64, enum (token), UDim, UDim2, Ray, Faces, Axes, BrickColor, Color3, Color3uint8, Vector2,
-  Vector3, Vector3int16, CFrame, NumberSequence, ColorSequence, NumberRange, Rect, PhysicalProperties,
-  SharedString and Ref.
-- Reference preservation: every instance gets a stable `$id`; `Ref` properties point at `$id`s and are
-  re-linked on compile in either format. SharedStrings are now preserved in XML too.
-- New projects default to `compiler.format = "binary"` and `build/<name>.rbxl`.
+## Output format
+
+The **file extension decides the format**: `--output game.rbxlx` is always XML and `game.rbxl` is always
+binary, `--xml` / `--binary` override the default, and a conflicting combination is an error. Every compile
+re-reads the bytes it just wrote and checks the instance count before reporting success. `upload` also
+checks that the file contents match the extension, so a binary file can no longer be uploaded as `.rbxlx`.
+
+## Autofill and validation (Roblox API database)
+
+Run `stewdio api update` once. It downloads the current API dump from the
+[Roblox-Client-Tracker](https://github.com/MaximumADHD/Roblox-Client-Tracker) repository and caches a compact index.
+Then every `compile` / `validate`:
+
+- checks class and property names ("did you mean ...?"),
+- coerces loosely written values to the exact type Roblox expects: enum names → tokens (`"Material": "Wood"`),
+  integers → floats, `[r,g,b]` / `{R,G,B}` / `"#rrggbb"` → Color3, instance `$id` strings → Refs, asset strings → Content,
+- applies Part aliases without a database too: `Size` → `size`, `Position` → `CFrame`, `Color` → `Color3uint8`.
+
+`compiler.autofill` = `off` | `normalize` (default) | `defaults`. `defaults` additionally writes default values
+for missing properties when the dump provides them (the dump format may not include defaults; `api update` tells you).
+
+## Authentication and upload
+
+    stewdio auth login          # prompts for an Open Cloud API key (or --stdin)
+    stewdio upload              # compile if needed, confirm, upload as a *Saved* version
+    stewdio upload --publish    # publish instead
+
+Keys are kept in the OS credential store (macOS Keychain, `secret-tool` on Linux, DPAPI on Windows) with a
+user-only file fallback; they are never written to `Project.toml` or printed. `STEWDIO_API_KEY` overrides
+stored credentials (handy in CI). The API key needs the `universe-places:write` permission.
+Network features use the system `curl`.
 
 ## Project layout
 
-- Each instance is a directory with `Instance.data.hjson`.
-- Scripts are `Name.server.lua`, `Name.client.lua`, `Name.module.lua` with a sidecar
-  `Name.server.data.hjson`. A script with children becomes a directory containing
-  `init.server.lua` (etc.) plus its children.
-- Properties are stored as `true`/`false`, strings, or typed objects such as
-  `{"$type": "Vector3", "X": 1, "Y": 2, "Z": 3}`. References use `$id`:
-  `{"$type": "Ref", "$value": "instance-005"}`.
-- Untyped values are inferred when compiling (`{X,Y,Z}` → Vector3, `{R,G,B}` → Color3,
-  integers → int, decimals → float).
+- Each instance is a directory with `Instance.data.hjson`; scripts are `Name.server.lua`, `Name.client.lua`,
+  `Name.module.lua` (+ sidecar metadata); a script with children is a directory with `init.server.lua` etc.
+- Properties are `true`/`false`, strings, numbers, `[x,y,z]`, or typed objects like
+  `{"$type": "Vector3", "X": 1, "Y": 2, "Z": 3}`. References use `$id`.
+- Model projects have no services: each top-level directory is a root instance.
+- `.stewdioignore` supports `*`, `?`, `**`, trailing `/`, leading `/` and `!` negation.
+
+Settings precedence: CLI > Project.toml > global config > defaults.
 
 ## Known limitations
 
-- Binary property types not listed above (e.g. Font, UniqueId, OptionalCFrame, SecurityCapabilities)
-  are skipped with a warning on decompile; XML-only types are skipped with a warning in binary output.
-- Binary string properties are typed by name (Source → ProtectedString, a list of known asset
-  properties → Content, a list of known blobs → BinaryString); other strings become `string`.
-  Compiling back to binary is lossless; compiling a binary-origin project to XML may mistype
-  unlisted Content properties.
-- SharedString keys use a Stewdio content hash instead of MD5.
-- Attributes (`AttributesSerialize`) are preserved as a raw `BinaryString`, not decoded.
-- Instances of one class with different property sets are written as separate INST groups.
-- Sibling order is not preserved (children load alphabetically).
+- Binary-format property types not interpreted (Font, UniqueId, OptionalCFrame, SecurityCapabilities) are skipped with a warning.
+- Binary strings are typed by property name (Source, known asset/blob properties).
+- SharedString keys use a Stewdio hash instead of MD5.
+- Attributes are preserved as a raw `AttributesSerialize` BinaryString, not decoded.
+- Sibling order is not preserved.
+- Only places can be uploaded.
 
 ## Build
 
     cargo build --release
     cargo test
 
-## Exit codes
-
-0 success · 1 general · 2 invalid arguments · 3 invalid project · 4 parsing · 5 compilation ·
+Exit codes: 0 success · 1 general · 2 arguments · 3 invalid project · 4 parsing · 5 compilation ·
 6 authentication · 7 upload · 8 unsupported format

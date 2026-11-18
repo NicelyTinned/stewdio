@@ -185,7 +185,32 @@ pub fn hjson_to_prop(name: &str, v: &Value) -> Result<Property, String> {
             Ok(mk(ty, n.clone()))
         }
         Value::Null => Ok(mk("Ref", "null".to_string())),
-        Value::Array(_) => Err(format!("property '{name}': arrays are not supported")),
+        Value::Array(a) => {
+            let nums: Option<Vec<String>> = a
+                .iter()
+                .map(|x| if let Value::Number(n) = x { Some(n.clone()) } else { None })
+                .collect();
+            match nums {
+                Some(n) if n.len() == 2 => Ok(Property {
+                    name: name.to_string(),
+                    ty: "Vector2".to_string(),
+                    value: PropValue::Fields(vec![
+                        ("X".to_string(), PropValue::Text(n[0].clone())),
+                        ("Y".to_string(), PropValue::Text(n[1].clone())),
+                    ]),
+                }),
+                Some(n) if n.len() == 3 => Ok(Property {
+                    name: name.to_string(),
+                    ty: "Vector3".to_string(),
+                    value: PropValue::Fields(vec![
+                        ("X".to_string(), PropValue::Text(n[0].clone())),
+                        ("Y".to_string(), PropValue::Text(n[1].clone())),
+                        ("Z".to_string(), PropValue::Text(n[2].clone())),
+                    ]),
+                }),
+                _ => Err(format!("property '{name}': only [x, y] or [x, y, z] number arrays are supported")),
+            }
+        }
         Value::Object(o) => {
             let explicit = match v.get("$type") {
                 Some(Value::Str(t)) => Some(t.clone()),

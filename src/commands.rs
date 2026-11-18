@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use crate::error::*;
 use crate::fsproj::{self, WriteOptions};
 use crate::model::*;
-use crate::project::{self, Project};
-use crate::{rbxl, rbxlx, util, validate};
+use crate::project::{self, xml_from_ext, Project};
+use crate::{api, rbxl, rbxlx, ui, util, validate};
 
 fn say(quiet: bool, msg: &str) {
     if !quiet {
@@ -114,13 +114,13 @@ fn default_tree(baseplate: bool) -> Vec<Instance> {
 }
 
 pub fn new_project(a: NewArgs) -> CliResult<()> {
-    if a.model {
-        return Err(CliError::new(UNSUPPORTED, "Model projects are not supported until v0.3"));
-    }
+    let model = a.model;
     let template = if a.empty {
         "empty".to_string()
     } else {
-        a.template.clone().unwrap_or_else(|| "baseplate".to_string())
+        a.template.clone().unwrap_or_else(|| {
+            crate::config::Global::load().get("templates.name").unwrap_or_else(|| "baseplate".to_string())
+        })
     };
     if template != "baseplate" && template != "empty" {
         return Err(CliError::new(
@@ -141,14 +141,22 @@ pub fn new_project(a: NewArgs) -> CliResult<()> {
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| a.name.clone());
 
-    let roots = default_tree(template == "baseplate");
+    let roots = if model {
+        if template == "empty" {
+            Vec::new()
+        } else {
+            vec![Instance::new("instance-001", "Model", &project_name)]
+        }
+    } else {
+        default_tree(template == "baseplate")
+    };
     let mut warnings = Vec::new();
     fsproj::write_children(&dir, &roots, &WriteOptions { write_scripts: true }, &mut warnings)?;
-    fs::write(dir.join("Project.toml"), project::render_project_toml(&project_name, "place", &template))?;
+    let kind = if model { "model" } else { "place" };
+    fs::write(dir.join("Project.toml"), project::render_project_toml(&project_name, kind, &template))?;
     fs::write(dir.join(".stewdioignore"), project::DEFAULT_IGNORE)?;
 
-    println!("Created project '{}' at {}", project_name, dir.display());
-    println!("Template: {template}");
+    println!("Created {kind} project '{}' at {}", project_name, dir.display());
     println!("\nNext steps:\n  cd {}\n  stewdio compile", dir.display());
     Ok(())
 }
@@ -178,16 +186,13 @@ fn write_guarded(path: &Path, content: &str, force: bool) -> CliResult<&'static 
 }
 
 pub fn init_project(a: InitArgs) -> CliResult<()> {
-    if a.model {
-        return Err(CliError::new(UNSUPPORTED, "Model projects are not supported until v0.3"));
-    }
     let cwd = std::env::current_dir()?;
     let name = cwd
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "stewdio-project".to_string());
 
-    let r1 = write_guarded(&cwd.join("Project.toml"), &project::render_project_toml(&name, "place", "baseplate"), a.force)?;
+    let r1 = write_guarded(&cwd.join("Project.toml"), &project::render_project_toml(&name, if a.model { "model" } else { "place" }, "baseplate"), a.force)?;
     println!("Project.toml: {r1}");
     let r2 = write_guarded(&cwd.join(".stewdioignore"), project::DEFAULT_IGNORE, a.force)?;
     println!(".stewdioignore: {r2}");
@@ -202,7 +207,7 @@ pub fn init_project(a: InitArgs) -> CliResult<()> {
         let dname = e.file_name().to_string_lossy().to_string();
         if p.join("Instance.data.hjson").is_file() {
             existing += 1;
-        } else if SERVICES.contains(&dname.as_str()) {
+        } else if !a.model && SERVICES.contains(&dname.as_str()) {
             let inst = Instance::new(&format!("init-{dname}"), &dname, &dname);
             fsproj::write_meta(&p, &inst)?;
             created += 1;
@@ -219,13 +224,13 @@ pub fn init_project(a: InitArgs) -> CliResult<()> {
 
 #[derive(Args)]
 pub struct CompileArgs {
-    /// Compile into .rbxlx format
+    /// Compile into XML format (.rbxlx / .rbxmx)
     #[arg(long, conflicts_with = "binary")]
     pub xml: bool,
-    /// Compile into .rbxl format
+    /// Compile into binary format (.rbxl / .rbxm)
     #[arg(long)]
     pub binary: bool,
-    /// Specify the output file
+    /// Specify the output file (the extension selects the format unless --xml/--binary is given)
     #[arg(long)]
     pub output: Option<PathBuf>,
     /// Perform release-oriented validation (warnings are errors)
@@ -237,72 +242,146 @@ pub struct CompileArgs {
     /// Suppress non-error output
     #[arg(long)]
     pub quiet: bool,
-    /// Disable compilation caching (v0.1 has no cache; accepted for compatibility)
+    /// Disable compilation caching (there is no cache yet; accepted for compatibility)
     #[arg(long)]
     pub no_cache: bool,
+    /// Property autofill mode: off, normalize or defaults
+    #[arg(long)]
+    pub autofill: Option<String>,
 }
 
-pub fn compile(a: CompileArgs) -> CliResult<()> {
-    let project = Project::current()?;
-    let xml_override = if a.binary {
-        Some(false)
-    } else if a.xml {
+pub struct BuildResult {
+    pub out: PathBuf,
+    pub use_xml: bool,
+    pub instances: usize,
+    pub scripts: usize,
+    pub warnings: usize,
+}
+
+/// Decide the output format and path. The file extension is trusted: `--output game.rbxlx`
+/// always produces XML, never binary bytes with an XML name.
+fn resolve_output(project: &Project, a: &CompileArgs) -> CliResult<(bool, PathBuf)> {
+    let st = project.settings();
+    let explicit = if a.xml {
         Some(true)
+    } else if a.binary {
+        Some(false)
     } else {
         None
     };
-    let use_xml = xml_override.unwrap_or(project.file.compiler.format == "xml");
+    if let (Some(x), Some(p)) = (explicit, &a.output) {
+        if let Some(e) = xml_from_ext(p) {
+            if e != x {
+                return Err(CliError::new(
+                    ARGS,
+                    format!(
+                        "Output file '{}' implies {} format but --{} was given",
+                        p.display(),
+                        if e { "XML" } else { "binary" },
+                        if x { "xml" } else { "binary" }
+                    ),
+                ));
+            }
+        }
+    }
+    let toml_out = project.file.compiler.output.as_ref().map(|o| project.root.join(o));
+    let use_xml = match explicit {
+        Some(x) => x,
+        None => a
+            .output
+            .as_ref()
+            .and_then(|p| xml_from_ext(p))
+            .or_else(|| toml_out.as_ref().and_then(|p| xml_from_ext(p)))
+            .unwrap_or(st.format == "xml"),
+    };
+    let out = match &a.output {
+        Some(p) => p.clone(),
+        None => project.output_path(use_xml),
+    };
+    Ok((use_xml, out))
+}
+
+fn verify(bytes: &[u8], use_xml: bool, expected: usize) -> Result<(), String> {
+    let decoded = if use_xml {
+        let text = std::str::from_utf8(bytes).map_err(|_| "output is not valid UTF-8".to_string())?;
+        rbxlx::decode(text)?
+    } else {
+        rbxl::decode(bytes)?
+    };
+    let n: usize = decoded.roots.iter().map(|r| r.count()).sum();
+    if n != expected {
+        return Err(format!("expected {expected} instances but the output contains {n}"));
+    }
+    Ok(())
+}
+
+pub fn build(project: &Project, a: &CompileArgs) -> CliResult<BuildResult> {
+    let started = std::time::Instant::now();
     let q = a.quiet;
+    let st = project.settings();
+    let is_model = project.is_model();
+    let (use_xml, out) = resolve_output(project, a)?;
+
     say(q, "[Stewdio] Loading project...");
-    let loaded = fsproj::load(&project.root);
+    let loaded = fsproj::load(&project.root, is_model);
     say(q, "[Stewdio] Reading instance metadata...");
     say(q, "[Stewdio] Loading Luau scripts...");
     say(q, "[Stewdio] Resolving references...");
-    let report = validate::validate(&loaded);
-    let release_failures = if a.release { report.warnings.len() } else { 0 };
-    if !report.errors.is_empty() || release_failures > 0 {
-        for e in &report.errors {
-            eprintln!("[Error] {e}");
+    let report = validate::validate(&loaded, is_model);
+    let mut errors = report.errors.clone();
+    let mut warnings = report.warnings.clone();
+
+    let mode = a.autofill.as_deref().map(api::Mode::parse).unwrap_or(st.autofill);
+    let database = if mode == api::Mode::Off { None } else { api::Api::load() };
+    if mode != api::Mode::Off && database.is_none() && !q {
+        ui::hint("run `stewdio api update` to enable property validation and autofill from the Roblox API");
+    }
+    let mut roots = loaded.roots.clone();
+    let fill = api::process(database.as_ref(), &mut roots, mode);
+    errors.extend(fill.errors);
+    warnings.extend(fill.warnings);
+
+    let release_failures = if a.release { warnings.len() } else { 0 };
+    if !errors.is_empty() || release_failures > 0 {
+        for e in &errors {
+            ui::error(e);
         }
         if a.release {
-            for w in &report.warnings {
-                eprintln!("[Error] (release) {w}");
+            for w in &warnings {
+                ui::error(&format!("(release) {w}"));
             }
         }
         return Err(CliError::new(
             PROJECT,
-            format!("Project validation failed with {} error(s)", report.errors.len() + release_failures),
+            format!("Project validation failed with {} error(s)", errors.len() + release_failures),
         ));
     }
-    let mut warnings = report.warnings.clone();
+
     say(q, "[Stewdio] Building DataModel...");
     let bytes: Vec<u8> = if use_xml {
         say(q, "[Stewdio] Serializing XML output...");
-        rbxlx::encode(&loaded.roots)
-            .map_err(|e| CliError::new(COMPILE, e))?
-            .into_bytes()
+        rbxlx::encode(&roots).map_err(|e| CliError::new(COMPILE, e))?.into_bytes()
     } else {
         say(q, "[Stewdio] Serializing binary output...");
-        let enc = rbxl::encode(&loaded.roots).map_err(|e| CliError::new(COMPILE, e))?;
+        let enc = rbxl::encode(&roots, !is_model, st.compression).map_err(|e| CliError::new(COMPILE, e))?;
         warnings.extend(enc.warnings);
         enc.bytes
     };
-    if release_failures == 0 && a.release && !warnings.is_empty() {
-        for w in &warnings {
-            eprintln!("[Error] (release) {w}");
-        }
-        return Err(CliError::new(
-            COMPILE,
-            format!("Release build failed with {} warning(s)", warnings.len()),
-        ));
-    }
+    let instances: usize = roots.iter().map(|r| r.count()).sum();
+    let scripts: usize = roots.iter().map(|r| r.script_count()).sum();
+    say(q, "[Stewdio] Verifying output...");
+    verify(&bytes, use_xml, instances)
+        .map_err(|e| CliError::new(COMPILE, format!("Output verification failed: {e}")))?;
+
     if a.verbose && !q {
         for w in &warnings {
-            eprintln!("[Warning] {w}");
+            ui::warning(w);
         }
         println!("[Stewdio] Paths excluded by .stewdioignore: {}", loaded.ignored);
+        if fill.filled > 0 {
+            println!("[Stewdio] Autofilled {} default propert{}", fill.filled, if fill.filled == 1 { "y" } else { "ies" });
+        }
     }
-    let out = a.output.clone().unwrap_or_else(|| project.output_path(xml_override));
     if let Some(parent) = out.parent() {
         if !parent.as_os_str().is_empty() {
             fs::create_dir_all(parent)?;
@@ -310,27 +389,32 @@ pub fn compile(a: CompileArgs) -> CliResult<()> {
     }
     fs::write(&out, bytes)?;
     if !q {
-        let instances: usize = loaded.roots.iter().map(|r| r.count()).sum();
-        let scripts: usize = loaded.roots.iter().map(|r| r.script_count()).sum();
-        println!("\nCompilation successful!\n");
+        ui::success("\nCompilation successful!\n");
         println!("Output: {}", out.display());
+        println!("Format: {}", if use_xml { "XML" } else { "binary" });
         println!("Instances: {instances}");
         println!("Scripts: {scripts}");
         println!("Warnings: {}", warnings.len());
+        println!("Time: {} ms", started.elapsed().as_millis());
     }
-    Ok(())
+    Ok(BuildResult { out, use_xml, instances, scripts, warnings: warnings.len() })
+}
+
+pub fn compile(a: CompileArgs) -> CliResult<()> {
+    let project = Project::current()?;
+    build(&project, &a).map(|_| ())
 }
 
 // ----------------------------------------------------------- decompile
 
 #[derive(Args)]
 pub struct DecompileArgs {
-    /// Roblox place file (.rbxl or .rbxlx)
+    /// Roblox place or model file (.rbxl, .rbxlx, .rbxm, .rbxmx)
     pub input: PathBuf,
     /// Specify the output directory
     #[arg(long)]
     pub output: Option<PathBuf>,
-    /// Export as a model project (not available until v0.3)
+    /// Export as a model project
     #[arg(long)]
     pub model: bool,
     /// Do not export script source
@@ -348,9 +432,6 @@ pub struct DecompileArgs {
 }
 
 pub fn decompile(a: DecompileArgs) -> CliResult<()> {
-    if a.model {
-        return Err(CliError::new(UNSUPPORTED, "Model projects are not supported until v0.3"));
-    }
     if !a.input.is_file() {
         return Err(CliError::new(ARGS, format!("Input file '{}' not found", a.input.display())));
     }
@@ -412,19 +493,42 @@ pub fn decompile(a: DecompileArgs) -> CliResult<()> {
     println!("[Stewdio] Extracting scripts...");
     println!("[Stewdio] Writing project files...");
     fs::create_dir_all(&out)?;
+    let input_is_model = matches!(
+        a.input.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref(),
+        Some("rbxm") | Some("rbxmx")
+    );
+    let as_model = a.model || input_is_model;
     let mut warnings = decoded.warnings.clone();
-    fsproj::write_children(&out, &decoded.roots, &WriteOptions { write_scripts: !a.no_scripts }, &mut warnings)?;
-    fs::write(out.join("Project.toml"), project::render_project_toml(&stem, "place", "baseplate"))?;
+    let mut roots = decoded.roots;
+    if as_model && !input_is_model {
+        let mut flat = Vec::new();
+        let mut flattened = 0;
+        for r in roots {
+            if SERVICES.contains(&r.class.as_str()) {
+                flattened += 1;
+                flat.extend(r.children);
+            } else {
+                flat.push(r);
+            }
+        }
+        roots = flat;
+        if flattened > 0 {
+            warnings.push(format!("{flattened} service(s) were flattened into model roots; service properties were dropped"));
+        }
+    }
+    fsproj::write_children(&out, &roots, &WriteOptions { write_scripts: !a.no_scripts }, &mut warnings)?;
+    let kind = if as_model { "model" } else { "place" };
+    fs::write(out.join("Project.toml"), project::render_project_toml(&stem, kind, "baseplate"))?;
     fs::write(out.join(".stewdioignore"), project::DEFAULT_IGNORE)?;
 
     if a.verbose {
         for w in &warnings {
-            eprintln!("[Warning] {w}");
+            ui::warning(w);
         }
     }
-    let instances: usize = decoded.roots.iter().map(|r| r.count()).sum();
-    let scripts: usize = decoded.roots.iter().map(|r| r.script_count()).sum();
-    println!("\nDecompilation successful!\n");
+    let instances: usize = roots.iter().map(|r| r.count()).sum();
+    let scripts: usize = roots.iter().map(|r| r.script_count()).sum();
+    ui::success("\nDecompilation successful!\n");
     println!("Instances: {instances}");
     println!("Scripts: {scripts}");
     println!("Warnings: {}", warnings.len());
@@ -446,29 +550,44 @@ pub struct ValidateArgs {
 
 pub fn validate_project(a: ValidateArgs) -> CliResult<()> {
     let project = Project::current()?;
-    let loaded = fsproj::load(&project.root);
-    let report = validate::validate(&loaded);
+    let is_model = project.is_model();
+    let loaded = fsproj::load(&project.root, is_model);
+    let report = validate::validate(&loaded, is_model);
+    let mut errors = report.errors.clone();
+    let mut warnings = report.warnings.clone();
+    let st = project.settings();
+    let database = api::Api::load();
+    if st.autofill != api::Mode::Off {
+        let mut tmp = loaded.roots.clone();
+        let fill = api::process(database.as_ref(), &mut tmp, st.autofill);
+        errors.extend(fill.errors);
+        warnings.extend(fill.warnings);
+    }
     if a.verbose {
         println!("[Stewdio] Project.toml: OK");
         println!("[Stewdio] Checked instance metadata, references, property types, class names,");
         println!("[Stewdio] duplicate identifiers, filesystem structure and script files.");
+        match &database {
+            Some(_) => println!("[Stewdio] Roblox API database: used for class/property checks"),
+            None => println!("[Stewdio] Roblox API database: not installed (run `stewdio api update`)"),
+        }
         println!("[Stewdio] Paths excluded by .stewdioignore: {}", loaded.ignored);
     }
-    for e in &report.errors {
-        eprintln!("[Error] {e}");
+    for e in &errors {
+        ui::error(e);
     }
-    for w in &report.warnings {
+    for w in &warnings {
         if a.strict {
-            eprintln!("[Error] {w}");
+            ui::error(w);
         } else {
-            eprintln!("[Warning] {w}");
+            ui::warning(w);
         }
     }
-    let errors = report.errors.len() + if a.strict { report.warnings.len() } else { 0 };
-    if errors > 0 {
-        return Err(CliError::new(PROJECT, format!("Validation failed with {errors} error(s)")));
+    let failed = errors.len() + if a.strict { warnings.len() } else { 0 };
+    if failed > 0 {
+        return Err(CliError::new(PROJECT, format!("Validation failed with {failed} error(s)")));
     }
-    println!("Validation passed ({} warning(s))", report.warnings.len());
+    ui::success(&format!("Validation passed ({} warning(s))", warnings.len()));
     Ok(())
 }
 
@@ -476,7 +595,7 @@ pub fn validate_project(a: ValidateArgs) -> CliResult<()> {
 
 pub fn info() -> CliResult<()> {
     let project = Project::current()?;
-    let loaded = fsproj::load(&project.root);
+    let loaded = fsproj::load(&project.root, project.is_model());
     let instances: usize = loaded.roots.iter().map(|r| r.count()).sum();
     let scripts: usize = loaded.roots.iter().map(|r| r.script_count()).sum();
     let opt = |v: Option<u64>| v.map(|x| x.to_string()).unwrap_or_else(|| "(not set)".to_string());
@@ -484,26 +603,13 @@ pub fn info() -> CliResult<()> {
     println!("Project version:    {}", project.file.project.version);
     println!("Project type:       {}", project.file.project.kind);
     println!("Stewdio format:     {}", project::FORMAT_VERSION);
-    println!("Compile format:     {}", project.file.compiler.format);
+    println!("Compile format:     {}", project.settings().format);
     println!("Universe ID:        {}", opt(project.file.roblox.universe_id));
     println!("Place ID:           {}", opt(project.file.roblox.place_id));
     println!("Instances:          {instances}");
     println!("Scripts:            {scripts}");
     println!("Project directory:  {}", project.root.display());
+    println!("Roblox API data:    {}", if api::Api::load().is_some() { "installed" } else { "not installed (stewdio api update)" });
     Ok(())
 }
 
-// --------------------------------------------------------------- stubs
-
-#[derive(Args)]
-pub struct PassArgs {
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true, num_args = 0..)]
-    pub args: Vec<String>,
-}
-
-pub fn not_implemented(name: &str, when: &str) -> CliResult<()> {
-    Err(CliError::new(
-        GENERAL,
-        format!("`stewdio {name}` is not implemented in v0.1 (planned for {when})"),
-    ))
-}

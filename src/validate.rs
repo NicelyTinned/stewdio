@@ -17,13 +17,22 @@ fn valid_ident(s: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-pub fn validate(loaded: &Loaded) -> Report {
+pub fn validate(loaded: &Loaded, model: bool) -> Report {
     let mut rep = Report { errors: Vec::new(), warnings: Vec::new() };
     for d in &loaded.diags {
         if d.is_error {
             rep.errors.push(d.msg.clone());
         } else {
             rep.warnings.push(d.msg.clone());
+        }
+    }
+    for r in &loaded.roots {
+        let service = SERVICES.contains(&r.class.as_str());
+        if model && service {
+            rep.warnings.push(format!("{}: services cannot be inserted from a model; it will not load in Studio", r.name));
+        }
+        if !model && !service {
+            rep.warnings.push(format!("{}: top-level instance of class {} is not a standard service", r.name, r.class));
         }
     }
     let mut ids: HashMap<String, String> = HashMap::new();

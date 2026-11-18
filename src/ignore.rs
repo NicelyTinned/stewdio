@@ -1,4 +1,5 @@
-//! .stewdioignore support (gitignore-like subset: comments, `*`, `?`, trailing `/`, leading `/`).
+//! .stewdioignore support (gitignore-like subset):
+//! comments, `*`, `?`, `**`, trailing `/` (directories only), leading `/` (anchored), `!` negation.
 use std::fs;
 use std::path::Path;
 
@@ -6,6 +7,7 @@ struct Rule {
     pat: Vec<char>,
     dir_only: bool,
     with_path: bool,
+    negate: bool,
 }
 
 pub struct IgnoreSet {
@@ -27,6 +29,11 @@ impl IgnoreSet {
             if l.is_empty() || l.starts_with('#') {
                 continue;
             }
+            let mut negate = false;
+            if let Some(s) = l.strip_prefix('!') {
+                negate = true;
+                l = s;
+            }
             let mut dir_only = false;
             let mut with_path = false;
             if let Some(s) = l.strip_suffix('/') {
@@ -43,24 +50,25 @@ impl IgnoreSet {
             if l.is_empty() {
                 continue;
             }
-            rules.push(Rule { pat: l.chars().collect(), dir_only, with_path });
+            rules.push(Rule { pat: l.chars().collect(), dir_only, with_path, negate });
         }
         IgnoreSet { rules }
     }
 
-    /// `rel` uses '/' separators and is relative to the project root.
+    /// `rel` uses '/' separators and is relative to the project root. The last matching rule wins.
     pub fn is_ignored(&self, rel: &str, is_dir: bool) -> bool {
         let base = rel.rsplit('/').next().unwrap_or(rel);
+        let mut ignored = false;
         for r in &self.rules {
             if r.dir_only && !is_dir {
                 continue;
             }
             let target: Vec<char> = if r.with_path { rel.chars().collect() } else { base.chars().collect() };
             if glob(&r.pat, &target) {
-                return true;
+                ignored = !r.negate;
             }
         }
-        false
+        ignored
     }
 }
 
@@ -68,12 +76,13 @@ fn glob(p: &[char], t: &[char]) -> bool {
     match p.first().copied() {
         None => t.is_empty(),
         Some('*') => {
-            let rest = &p[1..];
+            let double = p.get(1) == Some(&'*');
+            let rest = if double { &p[2..] } else { &p[1..] };
             for k in 0..=t.len() {
                 if glob(rest, &t[k..]) {
                     return true;
                 }
-                if k < t.len() && t[k] == '/' {
+                if k < t.len() && !double && t[k] == '/' {
                     break;
                 }
             }
@@ -96,5 +105,13 @@ mod tests {
         assert!(s.is_ignored("Workspace/a.tmp", false));
         assert!(s.is_ignored("ServerStorage/PrivateAssets", true));
         assert!(!s.is_ignored("Workspace/Part", true));
+    }
+
+    #[test]
+    fn negation_and_double_star() {
+        let s = IgnoreSet::parse("*.bak\n!keep.bak\n**/Scratch\n");
+        assert!(s.is_ignored("a/x.bak", false));
+        assert!(!s.is_ignored("a/keep.bak", false));
+        assert!(s.is_ignored("Workspace/deep/Scratch", true));
     }
 }

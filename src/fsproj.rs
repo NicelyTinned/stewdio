@@ -124,7 +124,7 @@ struct Loader {
     ignored: usize,
 }
 
-pub fn load(root: &Path) -> Loaded {
+pub fn load(root: &Path, model: bool) -> Loaded {
     let mut l = Loader { ignore: IgnoreSet::load(root), diags: Vec::new(), ignored: 0 };
     let mut roots = Vec::new();
     for (name, p, is_dir) in l.entries(root) {
@@ -138,7 +138,7 @@ pub fn load(root: &Path) -> Loaded {
         if !is_dir {
             continue; // loose files at the project root (README, .gitignore, ...)
         }
-        if let Some(i) = l.load_dir(&p, &name, true) {
+        if let Some(i) = l.load_dir(&p, &name, !model) {
             roots.push(i);
         }
     }

@@ -167,3 +167,56 @@ pub fn hash16(data: &[u8]) -> [u8; 16] {
     o[8..].copy_from_slice(&b.to_le_bytes());
     o
 }
+
+pub fn levenshtein(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for i in 1..=a.len() {
+        let mut cur = vec![i; b.len() + 1];
+        for j in 1..=b.len() {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        prev = cur;
+    }
+    prev[b.len()]
+}
+
+/// Closest candidate to `name` (case-insensitive), if it is close enough to be a plausible typo.
+pub fn suggest<'a>(name: &str, candidates: impl Iterator<Item = &'a str>) -> Option<String> {
+    let lname = name.to_lowercase();
+    let limit = (name.chars().count() / 3).max(2);
+    let mut best: Option<(usize, &str)> = None;
+    for c in candidates {
+        let d = levenshtein(&lname, &c.to_lowercase());
+        if d <= limit && best.map(|(bd, _)| d < bd).unwrap_or(true) {
+            best = Some((d, c));
+        }
+    }
+    best.map(|(_, c)| c.to_string())
+}
+
+/// Directory for global Stewdio data (config, credentials, API cache).
+pub fn config_dir() -> std::path::PathBuf {
+    use std::path::PathBuf;
+    if let Some(p) = std::env::var_os("STEWDIO_HOME") {
+        return PathBuf::from(p);
+    }
+    if cfg!(windows) {
+        if let Some(a) = std::env::var_os("APPDATA") {
+            return PathBuf::from(a).join("stewdio");
+        }
+    }
+    let home = std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    if cfg!(target_os = "macos") {
+        return home.join("Library").join("Application Support").join("stewdio");
+    }
+    if let Some(x) = std::env::var_os("XDG_CONFIG_HOME") {
+        return PathBuf::from(x).join("stewdio");
+    }
+    home.join(".config").join("stewdio")
+}

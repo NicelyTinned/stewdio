@@ -75,7 +75,8 @@ impl Element {
                     Node::Text(t) => out.push_str(&escape_text(t)),
                     Node::CData(t) => {
                         out.push_str("<![CDATA[");
-                        out.push_str(&t.replace("]]>", "]]]]><![CDATA[>"));
+                        let clean: String = t.chars().map(|c| if is_xml_char(c) { c } else { '\u{FFFD}' }).collect();
+                        out.push_str(&clean.replace("]]>", "]]]]><![CDATA[>"));
                         out.push_str("]]>");
                     }
                     Node::Element(_) => {}
@@ -102,8 +103,27 @@ impl Element {
     }
 }
 
+fn is_xml_char(c: char) -> bool {
+    matches!(c, '\t' | '\n' | '\r')
+        || ('\u{20}'..='\u{D7FF}').contains(&c)
+        || ('\u{E000}'..='\u{FFFD}').contains(&c)
+        || ('\u{10000}'..='\u{10FFFF}').contains(&c)
+}
+
+/// Escape text for XML 1.0. Characters XML cannot represent are replaced with U+FFFD.
 pub fn escape_text(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    let mut o = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => o.push_str("&amp;"),
+            '<' => o.push_str("&lt;"),
+            '>' => o.push_str("&gt;"),
+            '\r' => o.push_str("&#13;"),
+            c if is_xml_char(c) => o.push(c),
+            _ => o.push('\u{FFFD}'),
+        }
+    }
+    o
 }
 
 fn escape_attr(s: &str) -> String {

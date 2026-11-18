@@ -24,6 +24,22 @@ impl Value {
         }
     }
 
+    pub fn as_array(&self) -> Option<&Vec<Value>> {
+        if let Value::Array(a) = self {
+            Some(a)
+        } else {
+            None
+        }
+    }
+
+    pub fn as_bool(&self) -> Option<bool> {
+        if let Value::Bool(b) = self {
+            Some(*b)
+        } else {
+            None
+        }
+    }
+
     pub fn as_str(&self) -> Option<&str> {
         if let Value::Str(s) = self {
             Some(s.as_str())
@@ -247,23 +263,21 @@ impl P {
     fn scalar(&mut self) -> Result<Value, String> {
         let st = self.i;
         let mut e = st;
-        while e < self.c.len() && self.c[e] != '\n' {
+        while e < self.c.len()
+            && !(self.c[e].is_whitespace() || matches!(self.c[e], ',' | '}' | ']' | '#'))
+        {
             e += 1;
         }
-        let line: String = self.c[st..e].iter().collect();
-        let tok_end = line
-            .find(|ch: char| matches!(ch, ',' | '}' | ']' | '#') || ch.is_whitespace())
-            .unwrap_or(line.len());
-        let tok = &line[..tok_end];
-        let after = line[tok_end..].trim_start();
-        let delim_ok = after.is_empty()
-            || after.starts_with(',')
-            || after.starts_with('}')
-            || after.starts_with(']')
-            || after.starts_with('#')
-            || after.starts_with("//");
+        let tok: String = self.c[st..e].iter().collect();
+        let mut k = e;
+        while k < self.c.len() && (self.c[k] == ' ' || self.c[k] == '\t' || self.c[k] == '\r') {
+            k += 1;
+        }
+        let delim_ok = k >= self.c.len()
+            || matches!(self.c[k], '\n' | ',' | '}' | ']' | '#')
+            || (self.c[k] == '/' && self.c.get(k + 1) == Some(&'/'));
         if delim_ok && !tok.is_empty() {
-            let v = match tok {
+            let v = match tok.as_str() {
                 "true" => Some(Value::Bool(true)),
                 "false" => Some(Value::Bool(false)),
                 "null" => Some(Value::Null),
@@ -271,11 +285,17 @@ impl P {
                 _ => None,
             };
             if let Some(v) = v {
-                self.i += tok.chars().count();
+                self.i = e;
                 return Ok(v);
             }
         }
-        self.i = e;
+        // quoteless string: runs to the end of the line
+        let mut eol = st;
+        while eol < self.c.len() && self.c[eol] != '\n' {
+            eol += 1;
+        }
+        let line: String = self.c[st..eol].iter().collect();
+        self.i = eol;
         Ok(Value::Str(line.trim().to_string()))
     }
 }

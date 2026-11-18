@@ -699,6 +699,23 @@ pub fn decode(data: &[u8]) -> Result<Decoded, String> {
 
 // =============================================================== writing
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Compression {
+    Auto,
+    Enabled,
+    Disabled,
+}
+
+impl Compression {
+    pub fn parse(s: &str) -> Compression {
+        match s {
+            "enabled" => Compression::Enabled,
+            "disabled" => Compression::Disabled,
+            _ => Compression::Auto,
+        }
+    }
+}
+
 pub struct Encoded {
     pub bytes: Vec<u8>,
     pub warnings: Vec<String>,
@@ -758,12 +775,12 @@ fn put_referents(b: &mut Vec<u8>, v: &[i32]) {
     put_i32s(b, &deltas);
 }
 
-fn write_chunk(out: &mut Vec<u8>, name: &[u8; 4], payload: &[u8], compress: bool) {
+fn write_chunk(out: &mut Vec<u8>, name: &[u8; 4], payload: &[u8], comp: Compression) {
     out.extend_from_slice(name);
     let mut compressed: Option<Vec<u8>> = None;
-    if compress && !payload.is_empty() {
+    if comp != Compression::Disabled && !payload.is_empty() {
         let c = lz4::compress(payload);
-        if c.len() < payload.len() {
+        if comp == Compression::Enabled || c.len() < payload.len() {
             compressed = Some(c);
         }
     }
@@ -1148,7 +1165,7 @@ struct Group {
     props: Vec<Vec<Property>>,
 }
 
-pub fn encode(roots: &[Instance]) -> Result<Encoded, String> {
+pub fn encode(roots: &[Instance], service_roots: bool, comp: Compression) -> Result<Encoded, String> {
     let mut flat: Vec<Flat> = Vec::new();
     let mut idmap: HashMap<String, i32> = HashMap::new();
     for r in roots {
@@ -1184,7 +1201,7 @@ pub fn encode(roots: &[Instance]) -> Result<Encoded, String> {
         }
         props.sort_by(|a, b| a.name.cmp(&b.name));
         let sig: Vec<(String, String)> = props.iter().map(|p| (p.name.clone(), p.ty.clone())).collect();
-        let root = f.parent < 0;
+        let root = f.parent < 0 && service_roots;
         let key = (f.inst.class.clone(), root, sig.clone());
         let gi = match gindex.get(&key) {
             Some(&g) => g,
@@ -1241,7 +1258,7 @@ pub fn encode(roots: &[Instance]) -> Result<Encoded, String> {
     put_u32(&mut meta, 1);
     put_str(&mut meta, b"ExplicitAutoJoints");
     put_str(&mut meta, b"true");
-    write_chunk(&mut out, b"META", &meta, true);
+    write_chunk(&mut out, b"META", &meta, comp);
 
     if !sstr.items.is_empty() {
         let mut b = Vec::new();
@@ -1251,7 +1268,7 @@ pub fn encode(roots: &[Instance]) -> Result<Encoded, String> {
             b.extend_from_slice(&util::hash16(d));
             put_str(&mut b, d);
         }
-        write_chunk(&mut out, b"SSTR", &b, true);
+        write_chunk(&mut out, b"SSTR", &b, comp);
     }
 
     for (gid, g) in groups.iter().enumerate() {
@@ -1264,11 +1281,11 @@ pub fn encode(roots: &[Instance]) -> Result<Encoded, String> {
         if g.root {
             b.extend(std::iter::repeat(1u8).take(g.members.len()));
         }
-        write_chunk(&mut out, b"INST", &b, true);
+        write_chunk(&mut out, b"INST", &b, comp);
     }
 
     for b in &prop_chunks {
-        write_chunk(&mut out, b"PROP", b, true);
+        write_chunk(&mut out, b"PROP", b, comp);
     }
 
     {
@@ -1279,10 +1296,10 @@ pub fn encode(roots: &[Instance]) -> Result<Encoded, String> {
         let pars: Vec<i32> = flat.iter().map(|f| f.parent).collect();
         put_referents(&mut b, &kids);
         put_referents(&mut b, &pars);
-        write_chunk(&mut out, b"PRNT", &b, true);
+        write_chunk(&mut out, b"PRNT", &b, comp);
     }
 
-    write_chunk(&mut out, b"END\0", b"</roblox>", false);
+    write_chunk(&mut out, b"END\0", b"</roblox>", Compression::Disabled);
     Ok(Encoded { bytes: out, warnings })
 }
 
@@ -1296,7 +1313,7 @@ mod tests {
     #[test]
     fn binary_round_trip() {
         let d = rbxlx::decode(SAMPLE).unwrap();
-        let e = encode(&d.roots).unwrap();
+        let e = encode(&d.roots, true, Compression::Auto).unwrap();
         assert!(e.bytes.starts_with(b"<roblox!"));
         let back = decode(&e.bytes).unwrap();
         assert_eq!(back.roots.len(), 1);

@@ -2,7 +2,10 @@ use serde::Deserialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use crate::api::Mode;
+use crate::config::Global;
 use crate::error::*;
+use crate::rbxl::Compression;
 use crate::util;
 
 pub const FORMAT_VERSION: &str = "1";
@@ -59,18 +62,14 @@ pub struct RobloxSection {
     pub place_id: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(default)]
 pub struct CompilerSection {
-    pub format: String,
+    pub format: Option<String>,
     pub output: Option<String>,
-    pub preserve_unknown_properties: bool,
-}
-
-impl Default for CompilerSection {
-    fn default() -> Self {
-        CompilerSection { format: "binary".to_string(), output: None, preserve_unknown_properties: true }
-    }
+    pub preserve_unknown_properties: Option<bool>,
+    pub autofill: Option<String>,
+    pub compression: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -98,9 +97,29 @@ impl Default for TemplatesSection {
     }
 }
 
+/// Effective settings: CLI > Project.toml > global config > built-in defaults.
+/// (CLI overrides are applied by the commands themselves.)
+pub struct Settings {
+    pub format: String,
+    pub autofill: Mode,
+    pub compression: Compression,
+    pub output_dir: String,
+}
+
 pub struct Project {
     pub root: PathBuf,
     pub file: ProjectFile,
+}
+
+fn one_of(what: &str, v: &str, allowed: &[&str]) -> CliResult<()> {
+    if allowed.contains(&v) {
+        Ok(())
+    } else {
+        Err(CliError::new(
+            PROJECT,
+            format!("Invalid Project.toml: {what} must be one of {} (got \"{v}\")", allowed.join(", ")),
+        ))
+    }
 }
 
 impl Project {
@@ -135,41 +154,76 @@ impl Project {
         if file.project.name.trim().is_empty() {
             return Err(CliError::new(PROJECT, "Invalid Project.toml: project.name is empty"));
         }
-        if file.project.kind != "place" && file.project.kind != "model" {
-            return Err(CliError::new(
-                PROJECT,
-                format!("Invalid Project.toml: project.type must be \"place\" or \"model\" (got \"{}\")", file.project.kind),
-            ));
+        one_of("project.type", &file.project.kind, &["place", "model"])?;
+        if let Some(v) = &file.compiler.format {
+            one_of("compiler.format", v, &["xml", "binary"])?;
         }
-        if file.compiler.format != "xml" && file.compiler.format != "binary" {
-            return Err(CliError::new(
-                PROJECT,
-                format!("Invalid Project.toml: compiler.format must be \"xml\" or \"binary\" (got \"{}\")", file.compiler.format),
-            ));
+        if let Some(v) = &file.compiler.autofill {
+            one_of("compiler.autofill", v, &["off", "normalize", "defaults"])?;
+        }
+        if let Some(v) = &file.compiler.compression {
+            one_of("compiler.compression", v, &["automatic", "enabled", "disabled"])?;
         }
         Ok(Project { root: root.to_path_buf(), file })
     }
 
-    pub fn output_path(&self, xml_override: Option<bool>) -> PathBuf {
-        let use_xml = xml_override.unwrap_or(self.file.compiler.format == "xml");
-        let ext = if use_xml { "rbxlx" } else { "rbxl" };
+    pub fn is_model(&self) -> bool {
+        self.file.project.kind == "model"
+    }
+
+    pub fn settings(&self) -> Settings {
+        let g = Global::load();
+        let pick = |proj: Option<&String>, key: &str, def: &str| -> String {
+            proj.cloned().or_else(|| g.get(key)).unwrap_or_else(|| def.to_string())
+        };
+        let c = &self.file.compiler;
+        Settings {
+            format: pick(c.format.as_ref(), "compiler.format", "binary"),
+            autofill: Mode::parse(&pick(c.autofill.as_ref(), "compiler.autofill", "normalize")),
+            compression: Compression::parse(&pick(c.compression.as_ref(), "compiler.compression", "automatic")),
+            output_dir: g.get("compiler.output_dir").unwrap_or_else(|| "build".to_string()),
+        }
+    }
+
+    pub fn extension(&self, use_xml: bool) -> &'static str {
+        match (self.is_model(), use_xml) {
+            (false, true) => "rbxlx",
+            (false, false) => "rbxl",
+            (true, true) => "rbxmx",
+            (true, false) => "rbxm",
+        }
+    }
+
+    /// Output path from Project.toml (or the default), with the extension matching `use_xml`.
+    pub fn output_path(&self, use_xml: bool) -> PathBuf {
+        let ext = self.extension(use_xml);
         let mut p = match &self.file.compiler.output {
             Some(o) => self.root.join(o),
             None => self
                 .root
-                .join("build")
+                .join(self.settings().output_dir)
                 .join(format!("{}.{}", util::sanitize_name(&self.file.project.name), ext)),
         };
-        if xml_override.is_some() && p.extension().and_then(|e| e.to_str()) != Some(ext) {
+        if p.extension().and_then(|e| e.to_str()) != Some(ext) {
             p.set_extension(ext);
         }
         p
     }
 }
 
+/// Which format does a file extension imply? Some(true) = XML, Some(false) = binary.
+pub fn xml_from_ext(p: &Path) -> Option<bool> {
+    match p.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref() {
+        Some("rbxlx") | Some("rbxmx") => Some(true),
+        Some("rbxl") | Some("rbxm") => Some(false),
+        _ => None,
+    }
+}
+
 pub fn render_project_toml(name: &str, kind: &str, template: &str) -> String {
     let n = util::toml_escape(name);
     let file = util::toml_escape(&util::sanitize_name(name));
+    let ext = if kind == "model" { "rbxm" } else { "rbxl" };
     format!(
         "[project]
 name = \"{n}\"
@@ -182,8 +236,10 @@ type = \"{kind}\"
 
 [compiler]
 format = \"binary\"
-output = \"build/{file}.rbxl\"
+output = \"build/{file}.{ext}\"
 preserve_unknown_properties = true
+# autofill = \"normalize\"   # off | normalize | defaults (needs `stewdio api update`)
+# compression = \"automatic\"  # automatic | enabled | disabled
 
 [decompiler]
 extract_scripts = true
