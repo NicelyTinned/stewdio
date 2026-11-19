@@ -37,8 +37,12 @@ pub fn meta_value(inst: &Instance) -> Value {
     ])
 }
 
+pub fn meta_text(inst: &Instance) -> String {
+    hjson::to_string_with_header(&meta_value(inst), "Stewdio instance metadata (HJSON)")
+}
+
 pub fn write_meta(dir: &Path, inst: &Instance) -> io::Result<()> {
-    fs::write(dir.join("Instance.data.hjson"), hjson::to_string(&meta_value(inst)))
+    fs::write(dir.join("Instance.data.hjson"), meta_text(inst))
 }
 
 fn unique(used: &mut HashSet<String>, base: &str, make: impl Fn(&str) -> String) -> (String, String) {
@@ -87,7 +91,7 @@ fn write_instance(
         }
         let stem = format!("{b}.{kind}");
         fs::write(dir.join(&fname), inst.source.as_deref().unwrap_or(""))?;
-        fs::write(dir.join(format!("{stem}.data.hjson")), hjson::to_string(&meta_value(inst)))?;
+        fs::write(dir.join(format!("{stem}.data.hjson")), meta_text(inst))?;
         return Ok(());
     }
     let (b, dname) = unique(used, &base, |b: &str| b.to_string());
@@ -128,7 +132,7 @@ pub fn load(root: &Path, model: bool) -> Loaded {
     let mut l = Loader { ignore: IgnoreSet::load(root), diags: Vec::new(), ignored: 0 };
     let mut roots = Vec::new();
     for (name, p, is_dir) in l.entries(root) {
-        if matches!(name.as_str(), "Project.toml" | ".stewdioignore" | ".git") {
+        if name.starts_with('.') || name == "Project.toml" {
             continue;
         }
         if l.ignore.is_ignored(&name, is_dir) {
@@ -389,5 +393,44 @@ impl Loader {
 
         let id = id.unwrap_or_else(|| format!("auto:{rel}"));
         Some(Instance { id, class, name, properties: props, tags, source, children: Vec::new() })
+    }
+}
+
+// ------------------------------------------------------------- saving
+
+/// Write `roots` back into the project directory. The directories that held the previous
+/// instances are moved to `.stewdio/backup/<timestamp>/` first (the newest 5 are kept).
+pub fn save_project(root: &Path, model: bool, roots: &[Instance]) -> io::Result<Option<PathBuf>> {
+    let ignore = IgnoreSet::load(root);
+    let backup = root.join(".stewdio").join("backup").join(util::now_secs().to_string());
+    let mut moved = false;
+    for e in fs::read_dir(root)?.flatten() {
+        let p = e.path();
+        let name = e.file_name().to_string_lossy().to_string();
+        if !p.is_dir() || name.starts_with('.') || ignore.is_ignored(&name, true) {
+            continue;
+        }
+        if model || p.join("Instance.data.hjson").is_file() {
+            fs::create_dir_all(&backup)?;
+            fs::rename(&p, backup.join(&name))?;
+            moved = true;
+        }
+    }
+    let mut warnings = Vec::new();
+    write_children(root, roots, &WriteOptions { write_scripts: true }, &mut warnings)?;
+    prune_backups(root, 5);
+    Ok(if moved { Some(backup) } else { None })
+}
+
+fn prune_backups(root: &Path, keep: usize) {
+    let dir = root.join(".stewdio").join("backup");
+    let mut names: Vec<String> = match fs::read_dir(&dir) {
+        Ok(rd) => rd.flatten().map(|e| e.file_name().to_string_lossy().to_string()).collect(),
+        Err(_) => return,
+    };
+    names.sort();
+    while names.len() > keep {
+        let n = names.remove(0);
+        let _ = fs::remove_dir_all(dir.join(n));
     }
 }

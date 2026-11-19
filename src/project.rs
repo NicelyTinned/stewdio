@@ -12,6 +12,7 @@ pub const FORMAT_VERSION: &str = "1";
 
 pub const DEFAULT_IGNORE: &str = "# Build output
 build/
+.stewdio/
 
 # Temporary files
 *.tmp

@@ -211,6 +211,12 @@ impl Api {
         s
     }
 
+    /// Days since the cached index was downloaded.
+    pub fn age_days(&self) -> Option<u64> {
+        let secs = self.version.split_whitespace().next()?.parse::<u64>().ok()?;
+        Some(util::now_secs().saturating_sub(secs) / 86400)
+    }
+
     pub fn find_prop(&self, class: &str, name: &str) -> Option<&ApiProp> {
         let mut cur = class;
         for _ in 0..64 {
@@ -266,6 +272,25 @@ impl Api {
             .iter()
             .find(|(n, _)| n.eq_ignore_ascii_case(item))
             .map(|(_, v)| *v)
+    }
+}
+
+/// A friendly nudge when the cached API data is old (or missing).
+pub fn stale_hint(api: Option<&Api>) -> Option<String> {
+    let max: u64 = config::Global::load()
+        .get("api.max_age_days")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(30);
+    match api {
+        None => Some("no Roblox API data cached; run `stewdio api update` for property validation and autofill".to_string()),
+        Some(a) => {
+            let age = a.age_days()?;
+            if age > max {
+                Some(format!("Roblox API data is {age} days old and may be out of date; run `stewdio api update`"))
+            } else {
+                None
+            }
+        }
     }
 }
 
@@ -590,6 +615,7 @@ pub fn run(a: ApiArgs) -> CliResult<()> {
                 .map(|d| d.as_secs())
                 .unwrap_or(0);
             api.version = format!("{now} {url}");
+            let _ = now;
             let p = index_path();
             if let Some(parent) = p.parent() {
                 fs::create_dir_all(parent)?;
@@ -610,6 +636,12 @@ pub fn run(a: ApiArgs) -> CliResult<()> {
                 let props: usize = api.classes.values().map(|c| c.props.len()).sum();
                 println!("Cached: {}", index_path().display());
                 println!("Source: {}", api.version);
+                if let Some(d) = api.age_days() {
+                    println!("Age: {d} day(s)");
+                }
+                if let Some(h) = stale_hint(Some(&api)) {
+                    ui::hint(&h);
+                }
                 println!("Classes: {}  Properties: {}  Enums: {}", api.classes.len(), props, api.enums.len());
             }
             None => {

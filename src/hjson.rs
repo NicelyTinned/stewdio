@@ -315,7 +315,7 @@ fn pad(out: &mut String, n: usize) {
     }
 }
 
-fn write_str(s: &str, out: &mut String) {
+fn write_quoted(s: &str, out: &mut String) {
     out.push('"');
     for c in s.chars() {
         match c {
@@ -329,6 +329,50 @@ fn write_str(s: &str, out: &mut String) {
         }
     }
     out.push('"');
+}
+
+fn key_is_plain(k: &str) -> bool {
+    let mut chars = k.chars();
+    match chars.next() {
+        Some(c) if c.is_alphanumeric() || matches!(c, '_' | '$' | '@') => {}
+        _ => return false,
+    }
+    k.chars().all(|c| c.is_alphanumeric() || matches!(c, '_' | '$' | '@' | '-' | '.'))
+}
+
+/// Strings that can be written without quotes (HJSON "quoteless" strings).
+fn needs_quotes(s: &str) -> bool {
+    if s.is_empty() || s.trim() != s || s.chars().any(|c| c.is_control()) {
+        return true;
+    }
+    let first = s.chars().next().unwrap_or(' ');
+    if matches!(first, '{' | '}' | '[' | ']' | ',' | ':' | '"' | '\'' | '#' | '`') {
+        return true;
+    }
+    if s.starts_with("//") || s.starts_with("/*") {
+        return true;
+    }
+    let end = s
+        .find(|c: char| c.is_whitespace() || matches!(c, ',' | '}' | ']' | '#'))
+        .unwrap_or(s.len());
+    let tok = &s[..end];
+    matches!(tok, "true" | "false" | "null") || is_json_number(tok)
+}
+
+fn write_str(s: &str, out: &mut String) {
+    if needs_quotes(s) {
+        write_quoted(s, out);
+    } else {
+        out.push_str(s);
+    }
+}
+
+fn write_key(k: &str, out: &mut String) {
+    if key_is_plain(k) {
+        out.push_str(k);
+    } else {
+        write_quoted(k, out);
+    }
 }
 
 fn write_value(v: &Value, ind: usize, out: &mut String) {
@@ -358,7 +402,7 @@ fn write_value(v: &Value, ind: usize, out: &mut String) {
                 out.push_str("{\n");
                 for (k, x) in o {
                     pad(out, ind + 1);
-                    write_str(k, out);
+                    write_key(k, out);
                     out.push_str(": ");
                     write_value(x, ind + 1, out);
                     out.push('\n');
@@ -368,6 +412,11 @@ fn write_value(v: &Value, ind: usize, out: &mut String) {
             }
         }
     }
+}
+
+/// Like `to_string` but starts with a `#` comment line.
+pub fn to_string_with_header(v: &Value, header: &str) -> String {
+    format!("# {header}\n{}", to_string(v))
 }
 
 #[cfg(test)]
@@ -390,6 +439,27 @@ mod tests {
         let v = parse("{\n # c\n a: hello world\n b: 3, // x\n}").unwrap();
         assert_eq!(v.get("a").and_then(|x| x.as_str()), Some("hello world"));
         assert_eq!(v.get("b"), Some(&Value::Number("3".into())));
+    }
+
+    #[test]
+    fn writes_real_hjson() {
+        let v = Value::Object(vec![
+            ("$className".into(), Value::Str("Part".into())),
+            ("Anchored".into(), Value::Bool(true)),
+            ("note".into(), Value::Str("hello world".into())),
+        ]);
+        let text = to_string(&v);
+        assert!(text.contains("$className: Part"));
+        assert!(!text.contains("\"$className\""));
+        assert!(text.contains("note: hello world"));
+    }
+
+    #[test]
+    fn tricky_strings_round_trip() {
+        for s in ["true, x", "3 apples", "  pad", "", "null", "42", "a:b", "#x", "{x}", "back\\slash", "say \"hi\"", "multi\nline"] {
+            let v = Value::Object(vec![("k".into(), Value::Str(s.to_string()))]);
+            assert_eq!(parse(&to_string(&v)).unwrap(), v, "string {s:?}");
+        }
     }
 
     #[test]

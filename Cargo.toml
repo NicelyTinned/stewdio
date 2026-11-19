@@ -1,6 +1,6 @@
 [package]
 name = "stewdio"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2021"
 description = "CLI-based Roblox place file decompiler, project manager, and compiler"
 
@@ -8,6 +8,9 @@ description = "CLI-based Roblox place file decompiler, project manager, and comp
 clap = { version = "4", features = ["derive"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+toml_edit = "0.22"
+crossterm = "0.27"
+clap_complete = "4"
 
 [profile.release]
 opt-level = 3

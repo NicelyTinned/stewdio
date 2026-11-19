@@ -1,6 +1,13 @@
 mod api;
 mod auth;
 mod commands;
+mod editor;
+mod explorer;
+mod history;
+mod luau;
+mod settings;
+mod tools;
+mod tui;
 mod config;
 mod cred;
 mod error;
@@ -19,7 +26,7 @@ mod util;
 mod validate;
 mod xml;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use error::CliResult;
 
 /// Stewdio: a standalone Roblox place file decompiler, project manager, and compiler.
@@ -52,8 +59,29 @@ enum Command {
     Info,
     /// Manage the cached Roblox API database used for validation and autofill
     Api(api::ApiArgs),
+    /// Browse and edit instances, properties and scripts in a terminal UI
+    Explorer(explorer::ExplorerArgs),
+    /// View or edit Project.toml from the command line
+    Settings(settings::SettingsArgs),
+    /// Re-upload an earlier snapshot of the place as a new version
+    Revert(history::RevertArgs),
+    /// Check your environment (curl, API data, credentials, project)
+    Doctor,
+    /// Remove build output (and with --all, backups and history)
+    Clean(tools::CleanArgs),
+    /// Rebuild automatically when project files change
+    Watch(tools::WatchArgs),
+    /// Print a shell completion script
+    Completions(CompletionsArgs),
     /// Display Stewdio version
     Version,
+}
+
+#[derive(clap::Args)]
+struct CompletionsArgs {
+    /// Shell to generate completions for
+    #[arg(value_enum)]
+    shell: clap_complete::Shell,
 }
 
 fn run(cli: Cli) -> CliResult<()> {
@@ -68,6 +96,17 @@ fn run(cli: Cli) -> CliResult<()> {
         Command::Validate(a) => commands::validate_project(a),
         Command::Info => commands::info(),
         Command::Api(a) => api::run(a),
+        Command::Explorer(a) => explorer::run(a),
+        Command::Settings(a) => settings::run(a),
+        Command::Revert(a) => history::run(a),
+        Command::Doctor => tools::doctor(),
+        Command::Clean(a) => tools::clean(a),
+        Command::Watch(a) => tools::watch(a),
+        Command::Completions(a) => {
+            let mut cmd = Cli::command();
+            clap_complete::generate(a.shell, &mut cmd, "stewdio", &mut std::io::stdout());
+            Ok(())
+        }
         Command::Version => {
             println!("stewdio {}", env!("CARGO_PKG_VERSION"));
             Ok(())

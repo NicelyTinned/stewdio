@@ -1,7 +1,6 @@
-# Stewdio v0.4
+# Stewdio v0.5
 
-A standalone Roblox place file toolkit: **decompile → edit → compile → upload**.
-No Roblox Studio required.
+A standalone Roblox place file toolkit: **decompile → edit → compile → upload**, no Roblox Studio required.
 
 ## Commands
 
@@ -10,62 +9,103 @@ No Roblox Studio required.
 | `new`, `init` | Create / initialize a place or `--model` project |
 | `decompile <file>` | `.rbxl`, `.rbxlx`, `.rbxm`, `.rbxmx` → project directory |
 | `compile` | Project → `.rbxl` / `.rbxlx` (places) or `.rbxm` / `.rbxmx` (models) |
-| `validate`, `info`, `version`, `help` | Project checks and information |
+| `explorer` | Terminal UI: instance tree, properties and a script editor |
+| `watch` | Rebuild automatically when files change |
+| `validate`, `info`, `doctor` | Checks and information |
 | `api update` / `api status` | Download / inspect the Roblox API database |
-| `config` | Global settings (`get`, `set`, `list`, `reset`, or interactive) |
+| `settings` | Edit `Project.toml` from the CLI (`list`, `get`, `set`, `unset`, `edit`, or interactive) |
+| `config` | Global settings |
 | `auth` | `login`, `logout`, `status`, `list`, `use <profile>` |
 | `upload` | Upload a place with Open Cloud (saved by default, `--publish` to go live) |
+| `revert` | Re-upload an earlier snapshot as a new version |
+| `clean`, `completions <shell>` | Remove build output / shell completions |
+
+## Metadata format
+
+`Instance.data.hjson` files are real [HJSON](https://hjson.github.io): unquoted keys, quoteless strings, no commas,
+`#` comments. Hand-written JSON-style files (quoted keys, commas) still load.
+
+    # Stewdio instance metadata (HJSON)
+    {
+      $className: Part
+      $name: Baseplate
+      $id: instance-002
+      Properties: {
+        Anchored: true
+        size: {
+          $type: Vector3
+          X: 512
+          Y: 1
+          Z: 512
+        }
+      }
+      Attributes: {}
+      Tags: []
+    }
+
+## Explorer
+
+`stewdio explorer` opens the project in a split terminal view: the **instance tree** on top and the **properties** of
+the selected instance below. Rows are indented by depth; `▸` marks a closed instance with children and `▾` an open one.
+
+| Key | Action |
+|---|---|
+| Up / Down, PgUp / PgDn | Move |
+| Right / Left | Open / close (or jump to the parent) |
+| Space / Enter | Action menu: **Edit, Rename, Cut, Copy, Paste, Add, Insert child, Delete** |
+| `a` | **Add** a new instance as the sibling directly below the selected one |
+| `i` | Insert a child |
+| `e` `r` `c` `x` `d` | Edit, rename, copy, cut, delete shortcuts |
+| Ctrl+P | Paste the copied/cut instances into the selected parent |
+| Tab | Switch between the explorer and the properties tab |
+| Ctrl+S / Ctrl+Z | Save the project to disk / undo |
+| `/` then `n` | Find instance by name / next match |
+| `*` / `-` | Expand all / collapse all |
+| `q` | Quit (asks about unsaved changes) |
+
+**Edit** on a Script, LocalScript or ModuleScript opens a full-screen script editor (Luau syntax highlighting, block
+balance diagnostics, auto-indent, find, undo). **Ctrl+X exits** the editor; Ctrl+S applies without leaving. **Edit** on any
+other instance moves to the properties tab, where Enter edits a value. The mouse works too (click rows and menu items,
+scroll wheel). Saving moves the old instance folders to `.stewdio/backup/` first (the newest 5 are kept).
 
 ## Output format
 
-The **file extension decides the format**: `--output game.rbxlx` is always XML and `game.rbxl` is always
-binary, `--xml` / `--binary` override the default, and a conflicting combination is an error. Every compile
-re-reads the bytes it just wrote and checks the instance count before reporting success. `upload` also
-checks that the file contents match the extension, so a binary file can no longer be uploaded as `.rbxlx`.
+The **file extension decides the format** (`--output game.rbxlx` is always XML); `--xml` / `--binary` override the
+default, and a conflict is an error. Every compile re-reads what it wrote and checks the instance count, and `upload`
+refuses a file whose contents do not match its extension.
 
 ## Autofill and validation (Roblox API database)
 
-Run `stewdio api update` once. It downloads the current API dump from the
+Run `stewdio api update`. It downloads the current API dump from the
 [Roblox-Client-Tracker](https://github.com/MaximumADHD/Roblox-Client-Tracker) repository and caches a compact index.
-Then every `compile` / `validate`:
+`compile`, `validate`, `info`, `doctor` and the explorer then nudge you when the data is older than `api.max_age_days`
+(default 30) or missing. With the data installed, compiling checks class/property names ("did you mean...?") and
+coerces loosely written values (enum names, integers → floats, `[r,g,b]`, `"#rrggbb"`, ids → Refs).
+`compiler.autofill = "defaults"` additionally writes default values when the dump provides them.
 
-- checks class and property names ("did you mean ...?"),
-- coerces loosely written values to the exact type Roblox expects: enum names → tokens (`"Material": "Wood"`),
-  integers → floats, `[r,g,b]` / `{R,G,B}` / `"#rrggbb"` → Color3, instance `$id` strings → Refs, asset strings → Content,
-- applies Part aliases without a database too: `Size` → `size`, `Position` → `CFrame`, `Color` → `Color3uint8`.
+## Upload and revert
 
-`compiler.autofill` = `off` | `normalize` (default) | `defaults`. `defaults` additionally writes default values
-for missing properties when the dump provides them (the dump format may not include defaults; `api update` tells you).
-
-## Authentication and upload
-
-    stewdio auth login          # prompts for an Open Cloud API key (or --stdin)
-    stewdio upload              # compile if needed, confirm, upload as a *Saved* version
+    stewdio auth login          # Open Cloud API key (OS credential store; STEWDIO_API_KEY overrides)
+    stewdio upload              # confirm, upload as a *Saved* version
     stewdio upload --publish    # publish instead
+    stewdio revert --list       # local upload history
+    stewdio revert              # pick an earlier upload and re-upload it as a new version
 
-Keys are kept in the OS credential store (macOS Keychain, `secret-tool` on Linux, DPAPI on Windows) with a
-user-only file fallback; they are never written to `Project.toml` or printed. `STEWDIO_API_KEY` overrides
-stored credentials (handy in CI). The API key needs the `universe-places:write` permission.
-Network features use the system `curl`.
+Open Cloud cannot list or roll back server-side place versions, so `revert` uses snapshots Stewdio keeps in
+`.stewdio/history/` whenever it uploads (newest 20). Roblox records a revert as a new version.
 
-## Project layout
+## Other
 
-- Each instance is a directory with `Instance.data.hjson`; scripts are `Name.server.lua`, `Name.client.lua`,
-  `Name.module.lua` (+ sidecar metadata); a script with children is a directory with `init.server.lua` etc.
-- Properties are `true`/`false`, strings, numbers, `[x,y,z]`, or typed objects like
-  `{"$type": "Vector3", "X": 1, "Y": 2, "Z": 3}`. References use `$id`.
-- Model projects have no services: each top-level directory is a root instance.
+- Settings precedence: CLI > Project.toml > global config > defaults.
 - `.stewdioignore` supports `*`, `?`, `**`, trailing `/`, leading `/` and `!` negation.
-
-Settings precedence: CLI > Project.toml > global config > defaults.
+- Network features use the system `curl`; `stewdio doctor` checks for it.
 
 ## Known limitations
 
 - Binary-format property types not interpreted (Font, UniqueId, OptionalCFrame, SecurityCapabilities) are skipped with a warning.
-- Binary strings are typed by property name (Source, known asset/blob properties).
-- SharedString keys use a Stewdio hash instead of MD5.
-- Attributes are preserved as a raw `AttributesSerialize` BinaryString, not decoded.
-- Sibling order is not preserved.
+- Binary strings are typed by property name; SharedString keys use a Stewdio hash instead of MD5.
+- Attributes are kept as a raw `AttributesSerialize` BinaryString.
+- The script editor has no text selection or LSP (highlighting + block diagnostics only).
 - Only places can be uploaded.
 
 ## Build

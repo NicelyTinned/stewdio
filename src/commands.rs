@@ -333,8 +333,10 @@ pub fn build(project: &Project, a: &CompileArgs) -> CliResult<BuildResult> {
 
     let mode = a.autofill.as_deref().map(api::Mode::parse).unwrap_or(st.autofill);
     let database = if mode == api::Mode::Off { None } else { api::Api::load() };
-    if mode != api::Mode::Off && database.is_none() && !q {
-        ui::hint("run `stewdio api update` to enable property validation and autofill from the Roblox API");
+    if mode != api::Mode::Off && !q {
+        if let Some(h) = api::stale_hint(database.as_ref()) {
+            ui::hint(&h);
+        }
     }
     let mut roots = loaded.roots.clone();
     let fill = api::process(database.as_ref(), &mut roots, mode);
@@ -563,6 +565,9 @@ pub fn validate_project(a: ValidateArgs) -> CliResult<()> {
         errors.extend(fill.errors);
         warnings.extend(fill.warnings);
     }
+    if let Some(h) = api::stale_hint(database.as_ref()) {
+        ui::hint(&h);
+    }
     if a.verbose {
         println!("[Stewdio] Project.toml: OK");
         println!("[Stewdio] Checked instance metadata, references, property types, class names,");
@@ -609,7 +614,11 @@ pub fn info() -> CliResult<()> {
     println!("Instances:          {instances}");
     println!("Scripts:            {scripts}");
     println!("Project directory:  {}", project.root.display());
-    println!("Roblox API data:    {}", if api::Api::load().is_some() { "installed" } else { "not installed (stewdio api update)" });
+    let database = api::Api::load();
+    println!("Roblox API data:    {}", match &database { Some(d) => format!("installed ({} day(s) old)", d.age_days().unwrap_or(0)), None => "not installed (stewdio api update)".to_string() });
+    if let Some(h) = api::stale_hint(database.as_ref()) {
+        ui::hint(&h);
+    }
     Ok(())
 }
 

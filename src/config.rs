@@ -19,6 +19,7 @@ pub const KEYS: &[(&str, &str, &str)] = &[
     ("compiler.preserve_unknown_properties", "true|false", "true"),
     ("templates.name", "baseplate|empty", "baseplate"),
     ("api.url", "url", DEFAULT_API_URL),
+    ("api.max_age_days", "days", "30"),
 ];
 
 pub struct Global {
