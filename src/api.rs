@@ -38,7 +38,8 @@ pub struct ApiProp {
     pub ty: String,
     pub save: bool,
     pub read_only: bool,
-    pub default: String,
+    pub default: Option<String>,
+    pub category: String,
 }
 
 pub struct ApiClass {
@@ -90,7 +91,8 @@ impl Api {
                             ty: f[4].to_string(),
                             save: f[5] == "1",
                             read_only: f[6] == "1",
-                            default: f[7].to_string(),
+                            default: f[7].strip_prefix('=').map(|d| d.to_string()),
+                            category: f.get(8).map(|c| c.to_string()).unwrap_or_default(),
                         },
                     );
                 }
@@ -145,12 +147,13 @@ impl Api {
                         .map(|a| a.iter().any(|x| x.as_str() == Some("ReadOnly")))
                         .unwrap_or(false);
                     let default = match m.get("Default") {
-                        Some(hjson::Value::Str(s)) => clean(s),
-                        Some(hjson::Value::Number(n)) => n.clone(),
-                        Some(hjson::Value::Bool(b)) => b.to_string(),
-                        _ => String::new(),
+                        Some(hjson::Value::Str(s)) => Some(clean(s)),
+                        Some(hjson::Value::Number(n)) => Some(n.clone()),
+                        Some(hjson::Value::Bool(b)) => Some(b.to_string()),
+                        _ => None,
                     };
-                    class.props.insert(pname, ApiProp { cat, ty, save, read_only, default });
+                    let category = m.get("Category").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                    class.props.insert(pname, ApiProp { cat, ty, save, read_only, default, category });
                 }
             }
             api.classes.insert(name, class);
@@ -190,14 +193,18 @@ impl Api {
             for p in pn {
                 let a = &c.props[p];
                 s.push_str(&format!(
-                    "P\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+                    "P\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                     n,
                     p,
                     a.cat,
                     a.ty,
                     if a.save { 1 } else { 0 },
                     if a.read_only { 1 } else { 0 },
-                    a.default
+                    match &a.default {
+                        Some(d) => format!("={}", clean(d)),
+                        None => String::new(),
+                    },
+                    clean(&a.category)
                 ));
             }
         }
@@ -246,7 +253,7 @@ impl Api {
         false
     }
 
-    fn chain_props(&self, class: &str) -> Vec<(&str, &ApiProp)> {
+    pub fn chain_props(&self, class: &str) -> Vec<(&str, &ApiProp)> {
         let mut out = Vec::new();
         let mut cur = class;
         for _ in 0..64 {
@@ -264,6 +271,10 @@ impl Api {
             }
         }
         out
+    }
+
+    pub fn enum_label(&self, en: &str, value: i64) -> Option<&str> {
+        self.enums.get(en)?.iter().find(|(_, v)| *v == value).map(|(n, _)| n.as_str())
     }
 
     pub fn enum_value(&self, en: &str, item: &str) -> Option<i64> {
@@ -445,7 +456,7 @@ fn color3_value(c: [f32; 3]) -> PropValue {
     ])
 }
 
-fn dump_name(n: &str) -> &str {
+pub fn dump_name(n: &str) -> &str {
     match n {
         "size" => "Size",
         "Color3uint8" => "Color",
@@ -538,35 +549,135 @@ fn coerce_props(api: &Api, inst: &mut Instance, path: &str, f: &mut Fill) {
     }
 }
 
+// Fallback defaults for very common properties, used when the dump has no "Default" value.
+const BUILTIN_DEFAULTS: &[(&str, &str, &str)] = &[
+    ("BasePart", "Anchored", "false"),
+    ("BasePart", "CanCollide", "true"),
+    ("BasePart", "CanTouch", "true"),
+    ("BasePart", "CanQuery", "true"),
+    ("BasePart", "CastShadow", "true"),
+    ("BasePart", "Massless", "false"),
+    ("BasePart", "Locked", "false"),
+    ("BasePart", "Transparency", "0"),
+    ("BasePart", "Reflectance", "0"),
+    ("BasePart", "Material", "Plastic"),
+    ("LuaSourceContainer", "Disabled", "false"),
+    ("Script", "Disabled", "false"),
+    ("Instance", "Archivable", "true"),
+];
+
+pub fn builtin_default(api: &Api, class: &str, name: &str) -> Option<&'static str> {
+    BUILTIN_DEFAULTS
+        .iter()
+        .find(|(base, n, _)| *n == name && api.is_a(class, base))
+        .map(|(_, _, d)| *d)
+}
+
+fn nums(d: &str, n: usize) -> Option<Vec<String>> {
+    let v: Vec<String> = d
+        .split(|c: char| c == ',' || c == '(' || c == ')' || c == '{' || c == '}' || c.is_whitespace())
+        .filter(|t| !t.is_empty() && t.parse::<f64>().is_ok())
+        .map(|t| t.to_string())
+        .collect();
+    if v.len() >= n {
+        Some(v.into_iter().take(n).collect())
+    } else {
+        None
+    }
+}
+
+fn fields(items: &[(&str, String)]) -> PropValue {
+    PropValue::Fields(items.iter().map(|(k, v)| (k.to_string(), PropValue::Text(v.clone()))).collect())
+}
+
+fn parse_default(api: &Api, ap: &ApiProp, d: &str) -> Option<(String, PropValue)> {
+    let t = |s: &str| PropValue::Text(s.to_string());
+    match (ap.cat.as_str(), ap.ty.as_str()) {
+        ("Primitive", "bool") => {
+            if d == "true" || d == "false" {
+                Some(("bool".to_string(), t(d)))
+            } else {
+                None
+            }
+        }
+        ("Primitive", ty @ ("float" | "double")) => d.parse::<f64>().ok().map(|_| (ty.to_string(), t(d))),
+        ("Primitive", ty @ ("int" | "int64")) => d.parse::<i64>().ok().map(|_| (ty.to_string(), t(d))),
+        ("Primitive", "string") => Some(("string".to_string(), t(d))),
+        ("Enum", en) => {
+            if d.parse::<i64>().is_ok() {
+                Some(("token".to_string(), t(d)))
+            } else {
+                api.enum_value(en, d).map(|v| ("token".to_string(), t(&v.to_string())))
+            }
+        }
+        ("DataType", "Vector3") => nums(d, 3).map(|n| ("Vector3".to_string(), fields(&[("X", n[0].clone()), ("Y", n[1].clone()), ("Z", n[2].clone())]))),
+        ("DataType", "Vector2") => nums(d, 2).map(|n| ("Vector2".to_string(), fields(&[("X", n[0].clone()), ("Y", n[1].clone())]))),
+        ("DataType", "Color3") => nums(d, 3).map(|n| {
+            let mut c: Vec<f32> = n.iter().map(|x| x.parse::<f32>().unwrap_or(0.0)).collect();
+            if c.iter().any(|v| *v > 1.0) {
+                for v in c.iter_mut() {
+                    *v /= 255.0;
+                }
+            }
+            ("Color3".to_string(), fields(&[("R", c[0].to_string()), ("G", c[1].to_string()), ("B", c[2].to_string())]))
+        }),
+        ("DataType", "UDim2") => nums(d, 4).map(|n| {
+            ("UDim2".to_string(), fields(&[("XS", n[0].clone()), ("XO", n[1].clone()), ("YS", n[2].clone()), ("YO", n[3].clone())]))
+        }),
+        ("DataType", "UDim") => nums(d, 2).map(|n| ("UDim".to_string(), fields(&[("S", n[0].clone()), ("O", n[1].clone())]))),
+        ("DataType", "BrickColor") => d.parse::<u32>().ok().map(|_| ("BrickColor".to_string(), t(d))),
+        ("DataType", "Content") => Some((
+            "Content".to_string(),
+            if d.is_empty() { fields(&[("null", String::new())]) } else { fields(&[("url", d.to_string())]) },
+        )),
+        _ => None,
+    }
+}
+
+/// The default value of a property as the dump (or the built-in table) describes it.
+pub fn default_value(api: &Api, class: &str, name: &str, ap: &ApiProp) -> Option<(String, PropValue)> {
+    let d = match ap.default.as_deref() {
+        Some(d) => d.trim().to_string(),
+        None => builtin_default(api, class, name)?.to_string(),
+    };
+    parse_default(api, ap, &d)
+}
+
+/// A neutral starting value (0 / false / empty) for creating a property whose default is unknown.
+pub fn zero_value(api: &Api, ap: &ApiProp) -> Option<(String, PropValue)> {
+    let z = |s: &str| s.to_string();
+    match (ap.cat.as_str(), ap.ty.as_str()) {
+        ("Primitive", "bool") => Some((z("bool"), PropValue::Text(z("false")))),
+        ("Primitive", ty @ ("float" | "double" | "int" | "int64")) => Some((z(ty), PropValue::Text(z("0")))),
+        ("Primitive", "string") => Some((z("string"), PropValue::Text(String::new()))),
+        ("Enum", en) => {
+            let v = api.enums.get(en).and_then(|i| i.first()).map(|(_, v)| *v).unwrap_or(0);
+            Some((z("token"), PropValue::Text(v.to_string())))
+        }
+        ("DataType", "Vector3") => Some((z("Vector3"), fields(&[("X", z("0")), ("Y", z("0")), ("Z", z("0"))]))),
+        ("DataType", "Vector2") => Some((z("Vector2"), fields(&[("X", z("0")), ("Y", z("0"))]))),
+        ("DataType", "Color3") => Some((z("Color3"), fields(&[("R", z("0")), ("G", z("0")), ("B", z("0"))]))),
+        ("DataType", "UDim2") => Some((z("UDim2"), fields(&[("XS", z("0")), ("XO", z("0")), ("YS", z("0")), ("YO", z("0"))]))),
+        ("DataType", "UDim") => Some((z("UDim"), fields(&[("S", z("0")), ("O", z("0"))]))),
+        ("DataType", "BrickColor") => Some((z("BrickColor"), PropValue::Text(z("194")))),
+        ("DataType", "Content") => Some((z("Content"), fields(&[("null", String::new())]))),
+        _ => None,
+    }
+}
+
 fn fill_defaults(api: &Api, inst: &mut Instance, f: &mut Fill) {
     let mut add: Vec<Property> = Vec::new();
     for (name, ap) in api.chain_props(&inst.class) {
-        if !ap.save || ap.read_only || ap.default.is_empty() || matches!(name, "Name" | "Source" | "Tags") {
+        // "Color" is stored as a packed Color3uint8 and is handled by normalization instead
+        if !ap.save || ap.read_only || matches!(name, "Name" | "Source" | "Tags" | "Color") {
             continue;
         }
-        let ser = match name {
-            "Size" => "size",
-            "Color" => "Color3uint8",
-            n => n,
-        };
+        let ser = if name == "Size" { "size" } else { name };
         if inst.properties.iter().any(|p| p.name == ser || p.name == name) || add.iter().any(|p| p.name == ser) {
             continue;
         }
-        let prop = match (ap.cat.as_str(), ap.ty.as_str()) {
-            ("Primitive", "bool") if ap.default == "true" || ap.default == "false" => Some(("bool", ap.default.clone())),
-            ("Primitive", t @ ("float" | "double")) if ap.default.parse::<f64>().is_ok() => Some((t, ap.default.clone())),
-            ("Primitive", t @ ("int" | "int64")) if ap.default.parse::<i64>().is_ok() => Some((t, ap.default.clone())),
-            ("Enum", en) => {
-                if ap.default.parse::<i64>().is_ok() {
-                    Some(("token", ap.default.clone()))
-                } else {
-                    api.enum_value(en, &ap.default).map(|v| ("token", v.to_string()))
-                }
-            }
-            _ => None,
-        };
-        if let Some((ty, v)) = prop {
-            add.push(Property { name: ser.to_string(), ty: ty.to_string(), value: PropValue::Text(v) });
+        if let Some((ty, value)) = default_value(api, &inst.class, name, ap) {
+            add.push(Property { name: ser.to_string(), ty, value });
         }
     }
     add.sort_by(|a, b| a.name.cmp(&b.name));
@@ -622,7 +733,7 @@ pub fn run(a: ApiArgs) -> CliResult<()> {
             }
             fs::write(&p, api.to_index())?;
             let props: usize = api.classes.values().map(|c| c.props.len()).sum();
-            let defaults: usize = api.classes.values().flat_map(|c| c.props.values()).filter(|p| !p.default.is_empty()).count();
+            let defaults: usize = api.classes.values().flat_map(|c| c.props.values()).filter(|p| p.default.is_some()).count();
             ui::success("API database updated");
             println!("Classes: {}", api.classes.len());
             println!("Properties: {props} ({defaults} with default values)");

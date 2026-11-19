@@ -3,7 +3,9 @@ mod auth;
 mod commands;
 mod editor;
 mod explorer;
+mod diff;
 mod history;
+mod inspect;
 mod luau;
 mod settings;
 mod tools;
@@ -19,6 +21,7 @@ mod lz4;
 mod model;
 mod project;
 mod rbxl;
+mod remote;
 mod rbxlx;
 mod ui;
 mod upload;
@@ -73,6 +76,18 @@ enum Command {
     Watch(tools::WatchArgs),
     /// Print a shell completion script
     Completions(CompletionsArgs),
+    /// Create a new project by downloading a place from Roblox
+    From(remote::FromArgs),
+    /// Replace this project's instances with the latest copy of its place
+    Pull(remote::PullArgs),
+    /// Compare two place files or project directories
+    Diff(diff::DiffArgs),
+    /// Print the instance hierarchy of the project
+    Tree(inspect::TreeArgs),
+    /// Search instance names, script source and property values
+    Find(inspect::FindArgs),
+    /// Compile the project and open it with the default program (Roblox Studio)
+    Open,
     /// Display Stewdio version
     Version,
 }
@@ -107,6 +122,12 @@ fn run(cli: Cli) -> CliResult<()> {
             clap_complete::generate(a.shell, &mut cmd, "stewdio", &mut std::io::stdout());
             Ok(())
         }
+        Command::From(a) => remote::from(a),
+        Command::Pull(a) => remote::pull(a),
+        Command::Diff(a) => diff::run(a),
+        Command::Tree(a) => inspect::tree(a),
+        Command::Find(a) => inspect::find(a),
+        Command::Open => commands::open_built(),
         Command::Version => {
             println!("stewdio {}", env!("CARGO_PKG_VERSION"));
             Ok(())

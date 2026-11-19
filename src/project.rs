@@ -222,9 +222,21 @@ pub fn xml_from_ext(p: &Path) -> Option<bool> {
 }
 
 pub fn render_project_toml(name: &str, kind: &str, template: &str) -> String {
+    render_project_toml_with_ids(name, kind, template, None, None)
+}
+
+pub fn render_project_toml_with_ids(name: &str, kind: &str, template: &str, universe: Option<u64>, place: Option<u64>) -> String {
     let n = util::toml_escape(name);
     let file = util::toml_escape(&util::sanitize_name(name));
     let ext = if kind == "model" { "rbxm" } else { "rbxl" };
+    let uni = match universe {
+        Some(u) => format!("universe_id = {u}"),
+        None => "# universe_id = 123456789".to_string(),
+    };
+    let pl = match place {
+        Some(p) => format!("place_id = {p}"),
+        None => "# place_id = 987654321".to_string(),
+    };
     format!(
         "[project]
 name = \"{n}\"
@@ -232,8 +244,8 @@ version = \"0.1.0\"
 type = \"{kind}\"
 
 [roblox]
-# universe_id = 123456789
-# place_id = 987654321
+{uni}
+{pl}
 
 [compiler]
 format = \"binary\"

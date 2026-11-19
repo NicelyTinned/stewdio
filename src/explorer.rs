@@ -3,10 +3,10 @@ use clap::Args;
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
 use crossterm::style::Color;
 use crossterm::terminal;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 
-use crate::api::{self, Api};
+use crate::api::{self, Api, ApiProp};
 use crate::editor::{Editor, EditorEvent};
 use crate::error::*;
 use crate::model::*;
@@ -164,6 +164,7 @@ enum Action {
     Cut,
     Copy,
     Paste,
+    Duplicate,
     Add,
     Insert,
     Delete,
@@ -192,6 +193,7 @@ struct Menu {
 enum Purpose {
     Rename(String),
     EditProp(String, String),
+    NewProp(String, String),
     Insert(Option<String>),
     Add(String),
     Tags(String),
@@ -226,12 +228,15 @@ enum PKind {
     Tags,
     Source,
     Prop(String),
+    Unset(String),
+    Header,
 }
 
 struct PRow {
     key: String,
     val: String,
     kind: PKind,
+    default: bool,
 }
 
 fn summarize(v: &PropValue) -> String {
@@ -248,25 +253,145 @@ fn summarize(v: &PropValue) -> String {
     }
 }
 
-fn prop_rows(inst: &Instance) -> Vec<PRow> {
+/// Value text for a set property; enum tokens show their name when the API data knows it.
+fn display_value(api: Option<&Api>, class: &str, p: &Property) -> String {
+    if let (Some(a), PropValue::Text(t)) = (api, &p.value) {
+        if p.ty == "token" {
+            if let Some(ap) = a.find_prop(class, api::dump_name(&p.name)) {
+                if ap.cat == "Enum" {
+                    if let Some(label) = t.trim().parse::<i64>().ok().and_then(|n| a.enum_label(&ap.ty, n)) {
+                        return format!("{label} ({t})");
+                    }
+                }
+            }
+        }
+    }
+    summarize(&p.value)
+}
+
+/// Text shown when editing a property (enum names instead of numbers when known).
+fn edit_initial(api: Option<&Api>, class: &str, p: &Property) -> Option<String> {
+    if let (Some(a), PropValue::Text(t)) = (api, &p.value) {
+        if p.ty == "token" {
+            if let Some(ap) = a.find_prop(class, api::dump_name(&p.name)) {
+                if let Some(label) = t.trim().parse::<i64>().ok().and_then(|n| a.enum_label(&ap.ty, n)) {
+                    return Some(label.to_string());
+                }
+            }
+        }
+    }
+    editable_text(&p.value)
+}
+
+fn prop_row(key: &str, val: String, kind: PKind, default: bool) -> PRow {
+    PRow { key: key.to_string(), val, kind, default }
+}
+
+fn prop_rows(inst: &Instance, api: Option<&Api>) -> Vec<PRow> {
     let mut rows = vec![
-        PRow { key: "Name".into(), val: inst.name.clone(), kind: PKind::Name },
-        PRow { key: "ClassName".into(), val: inst.class.clone(), kind: PKind::Class },
-        PRow { key: "$id".into(), val: inst.id.clone(), kind: PKind::Id },
-        PRow { key: "Tags".into(), val: inst.tags.join(", "), kind: PKind::Tags },
+        prop_row("Name", inst.name.clone(), PKind::Name, false),
+        prop_row("ClassName", inst.class.clone(), PKind::Class, false),
+        prop_row("$id", inst.id.clone(), PKind::Id, false),
+        prop_row("Tags", inst.tags.join(", "), PKind::Tags, false),
     ];
     if is_script_class(&inst.class) {
         let n = inst.source.as_ref().map(|s| s.lines().count()).unwrap_or(0);
-        rows.push(PRow { key: "Source".into(), val: format!("({n} lines) Enter to open the editor"), kind: PKind::Source });
+        rows.push(prop_row("Source", format!("({n} lines) Enter to open the editor"), PKind::Source, false));
     }
-    for p in &inst.properties {
-        rows.push(PRow {
-            key: p.name.clone(),
-            val: format!("{}  {}", summarize(&p.value), format!("<{}>", p.ty)),
-            kind: PKind::Prop(p.name.clone()),
-        });
+    let known = api.filter(|a| a.classes.contains_key(&inst.class));
+    match known {
+        None => {
+            for p in &inst.properties {
+                rows.push(prop_row(&p.name, format!("{}  <{}>", summarize(&p.value), p.ty), PKind::Prop(p.name.clone()), false));
+            }
+        }
+        Some(a) => {
+            let mut set: HashMap<String, &Property> = HashMap::new();
+            for p in &inst.properties {
+                set.insert(api::dump_name(&p.name).to_string(), p);
+            }
+            let mut by_cat: BTreeMap<String, Vec<(&str, &ApiProp)>> = BTreeMap::new();
+            let mut seen: HashSet<&str> = HashSet::new();
+            for (name, ap) in a.chain_props(&inst.class) {
+                if !ap.save || ap.read_only || matches!(name, "Name" | "Source" | "Tags") || !seen.insert(name) {
+                    continue;
+                }
+                let cat = if ap.category.is_empty() { "Properties".to_string() } else { ap.category.clone() };
+                by_cat.entry(cat).or_default().push((name, ap));
+            }
+            for (cat, mut items) in by_cat {
+                items.sort_by(|x, y| x.0.cmp(y.0));
+                rows.push(prop_row(&cat, String::new(), PKind::Header, false));
+                for (name, ap) in items {
+                    match set.remove(name) {
+                        Some(p) => rows.push(prop_row(
+                            name,
+                            format!("{}  <{}>", display_value(api, &inst.class, p), p.ty),
+                            PKind::Prop(p.name.clone()),
+                            false,
+                        )),
+                        None => {
+                            let shown = match api::default_value(a, &inst.class, name, ap) {
+                                Some((ty, v)) => {
+                                    let tmp = Property { name: name.to_string(), ty, value: v };
+                                    format!("{}  (default)", display_value(api, &inst.class, &tmp))
+                                }
+                                None => format!("-  <{}>", ap.ty),
+                            };
+                            rows.push(prop_row(name, shown, PKind::Unset(name.to_string()), true));
+                        }
+                    }
+                }
+            }
+            if !set.is_empty() {
+                let mut rest: Vec<&Property> = set.into_values().collect();
+                rest.sort_by(|a, b| a.name.cmp(&b.name));
+                rows.push(prop_row("Other", String::new(), PKind::Header, false));
+                for p in rest {
+                    rows.push(prop_row(&p.name, format!("{}  <{}>", summarize(&p.value), p.ty), PKind::Prop(p.name.clone()), false));
+                }
+            }
+        }
     }
     rows
+}
+
+/// Enum names typed by the user ("Wood") become the numeric token Roblox stores.
+fn resolve_enum_text(api: Option<&Api>, class: &str, name: &str, text: &str) -> String {
+    if let Some(a) = api {
+        if let Some(ap) = a.find_prop(class, api::dump_name(name)) {
+            if ap.cat == "Enum" && text.trim().parse::<i64>().is_err() {
+                if let Some(v) = a.enum_value(&ap.ty, text.trim()) {
+                    return v.to_string();
+                }
+            }
+        }
+    }
+    text.to_string()
+}
+
+/// Create a property that was not set yet (starting from its default, or a neutral value) and apply `text`.
+fn create_prop(api: &Api, inst: &mut Instance, name: &str, text: &str, ids: &HashSet<String>) -> Result<(), String> {
+    let ap = api.find_prop(&inst.class, name).ok_or_else(|| "unknown property".to_string())?;
+    let (ty, value) = api::default_value(api, &inst.class, name, ap)
+        .or_else(|| api::zero_value(api, ap))
+        .ok_or_else(|| format!("{name} ({}) cannot be created here; edit Instance.data.hjson", ap.ty))?;
+    inst.properties.push(Property { name: name.to_string(), ty, value });
+    let text = resolve_enum_text(Some(api), &inst.class, name, text);
+    if let Err(e) = apply_prop_edit(inst, name, &text, ids) {
+        inst.properties.pop();
+        return Err(e);
+    }
+    // normalize aliases (Size -> size, Color -> Color3uint8, ...)
+    let mut tmp = inst.clone();
+    tmp.children.clear();
+    let fill = api::process(Some(api), std::slice::from_mut(&mut tmp), api::Mode::Normalize);
+    if let Some(e) = fill.errors.first() {
+        inst.properties.pop();
+        return Err(e.clone());
+    }
+    inst.properties = tmp.properties;
+    Ok(())
 }
 
 fn apply_prop_edit(inst: &mut Instance, name: &str, input: &str, ids: &HashSet<String>) -> Result<(), String> {
@@ -507,6 +632,7 @@ impl App {
         if self.clip.is_some() {
             v.push((Action::Paste, "Paste (Ctrl+P)"));
         }
+        v.push((Action::Duplicate, "Duplicate (Ctrl+D)"));
         v.push((Action::Add, "Add (sibling below)"));
         v.push((Action::Insert, "Insert child"));
         v.push((Action::Delete, "Delete"));
@@ -562,6 +688,7 @@ impl App {
                 self.say(format!("Cut '{}' (Ctrl+P to paste it)", inst.name));
             }
             Action::Paste => self.paste(),
+            Action::Duplicate => self.duplicate(),
             Action::Add => self.prompt("Add instance below (class name)", &inst.class, Purpose::Add(id)),
             Action::Insert => self.prompt("Insert child (class name)", "Part", Purpose::Insert(Some(id))),
             Action::Delete => {
@@ -667,6 +794,87 @@ impl App {
             self.clip = Some(clip);
         }
         self.say(format!("Pasted {n} instance(s)"));
+    }
+
+    fn duplicate(&mut self) {
+        let inst = match self.selected() {
+            Some(i) => i.clone(),
+            None => return,
+        };
+        let path = match find_path(&self.roots, &inst.id) {
+            Some(p) => p,
+            None => return,
+        };
+        let copy = self.clone_fresh(&inst);
+        let new_id = copy.id.clone();
+        self.snapshot();
+        if let Some((last, parent)) = path.split_last() {
+            if let Some(list) = children_mut(&mut self.roots, parent) {
+                let at = (*last + 1).min(list.len());
+                list.insert(at, copy);
+            }
+        }
+        self.rebuild();
+        self.select_id(&new_id);
+        self.say(format!("Duplicated '{}'", inst.name));
+    }
+
+    fn move_psel(&mut self, dir: isize) {
+        let rows = match self.selected() {
+            Some(i) => prop_rows(i, self.api.as_ref()),
+            None => return,
+        };
+        let mut i = self.psel as isize;
+        loop {
+            i += dir;
+            if i < 0 || i as usize >= rows.len() {
+                return;
+            }
+            if !matches!(rows[i as usize].kind, PKind::Header) {
+                self.psel = i as usize;
+                return;
+            }
+        }
+    }
+
+    fn reset_prop(&mut self) {
+        let inst = match self.selected() {
+            Some(i) => i.clone(),
+            None => return,
+        };
+        let rows = prop_rows(&inst, self.api.as_ref());
+        let name = match rows.get(self.psel).map(|r| r.kind.clone()) {
+            Some(PKind::Prop(n)) => n,
+            _ => {
+                self.fail("Only properties that are set can be reset to their default");
+                return;
+            }
+        };
+        self.snapshot();
+        if let Some(path) = find_path(&self.roots, &inst.id) {
+            if let Some(i) = get_mut(&mut self.roots, &path) {
+                i.properties.retain(|p| p.name != name);
+            }
+        }
+        let count = self.selected().map(|i| prop_rows(i, self.api.as_ref()).len()).unwrap_or(1);
+        self.psel = self.psel.min(count.saturating_sub(1));
+        self.say(format!("{name} reset to its default"));
+    }
+
+    fn begin_new_prop(&mut self, inst: &Instance, name: &str) {
+        let res: Result<String, String> = (|| {
+            let api = self.api.as_ref().ok_or("Roblox API data is not installed (run `stewdio api update`)")?;
+            let ap = api.find_prop(&inst.class, name).ok_or("unknown property")?;
+            let (ty, value) = api::default_value(api, &inst.class, name, ap)
+                .or_else(|| api::zero_value(api, ap))
+                .ok_or_else(|| format!("{name} ({}) cannot be created here; edit Instance.data.hjson", ap.ty))?;
+            let tmp = Property { name: name.to_string(), ty, value };
+            edit_initial(Some(api), &inst.class, &tmp).ok_or_else(|| "nested value; edit Instance.data.hjson".to_string())
+        })();
+        match res {
+            Ok(text) => self.prompt(&format!("Set {name}"), &text, Purpose::NewProp(inst.id.clone(), name.to_string())),
+            Err(e) => self.fail(e),
+        }
     }
 
     /// Validate a class name (syntax + the API database when available).
@@ -809,18 +1017,24 @@ impl App {
             Some(i) => i.clone(),
             None => return,
         };
-        let rows = prop_rows(&inst);
+        let rows = prop_rows(&inst, self.api.as_ref());
         let row = match rows.get(self.psel) {
             Some(r) => r.clone_row(),
             None => return,
         };
         match row.kind {
+            PKind::Header => {}
             PKind::Name => self.prompt("Rename", &inst.name, Purpose::Rename(inst.id.clone())),
             PKind::Class | PKind::Id => self.fail("This field is read-only"),
             PKind::Tags => self.prompt("Tags (comma separated)", &inst.tags.join(", "), Purpose::Tags(inst.id.clone())),
             PKind::Source => self.open_editor(&inst.id),
+            PKind::Unset(name) => self.begin_new_prop(&inst, &name),
             PKind::Prop(name) => {
-                let value = inst.properties.iter().find(|p| p.name == name).and_then(|p| editable_text(&p.value));
+                let value = inst
+                    .properties
+                    .iter()
+                    .find(|p| p.name == name)
+                    .and_then(|p| edit_initial(self.api.as_ref(), &inst.class, p));
                 match value {
                     Some(v) => self.prompt(&format!("Edit {name}"), &v, Purpose::EditProp(inst.id.clone(), name)),
                     None => self.fail("Nested value; edit Instance.data.hjson to change it"),
@@ -854,6 +1068,8 @@ impl App {
                 let ids = all_ids(&self.roots);
                 if let Some(path) = find_path(&self.roots, &id) {
                     let before = self.roots.clone();
+                    let class = get(&self.roots, &path).map(|i| i.class.clone()).unwrap_or_default();
+                    let text = resolve_enum_text(self.api.as_ref(), &class, &name, &text);
                     let result = match get_mut(&mut self.roots, &path) {
                         Some(i) => apply_prop_edit(i, &name, &text, &ids),
                         None => Err("instance vanished".to_string()),
@@ -863,6 +1079,26 @@ impl App {
                             self.undo.push(before);
                             self.dirty = true;
                             self.say(format!("{name} updated"));
+                        }
+                        Err(e) => self.fail(format!("{name}: {e}")),
+                    }
+                }
+            }
+            Purpose::NewProp(id, name) => {
+                let ids = all_ids(&self.roots);
+                if let Some(path) = find_path(&self.roots, &id) {
+                    let before = self.roots.clone();
+                    let api = self.api.take();
+                    let result = match (&api, get_mut(&mut self.roots, &path)) {
+                        (Some(a), Some(i)) => create_prop(a, i, &name, &text, &ids),
+                        _ => Err("Roblox API data is not installed".to_string()),
+                    };
+                    self.api = api;
+                    match result {
+                        Ok(()) => {
+                            self.undo.push(before);
+                            self.dirty = true;
+                            self.say(format!("{name} set"));
                         }
                         Err(e) => self.fail(format!("{name}: {e}")),
                     }
@@ -896,6 +1132,7 @@ impl App {
         if ctrl {
             match k.code {
                 KeyCode::Char('p') => self.paste(),
+                KeyCode::Char('d') => self.duplicate(),
                 KeyCode::Char('s') => self.save(),
                 KeyCode::Char('z') => self.undo(),
                 KeyCode::Char('c') | KeyCode::Char('q') => return self.try_quit(),
@@ -994,15 +1231,21 @@ impl App {
     }
 
     fn key_props(&mut self, k: KeyEvent) {
-        let count = self.selected().map(|i| prop_rows(i).len()).unwrap_or(0);
         match k.code {
-            KeyCode::Up => self.psel = self.psel.saturating_sub(1),
-            KeyCode::Down => {
-                if self.psel + 1 < count {
-                    self.psel += 1;
+            KeyCode::Up => self.move_psel(-1),
+            KeyCode::Down => self.move_psel(1),
+            KeyCode::PageUp => {
+                for _ in 0..8 {
+                    self.move_psel(-1);
+                }
+            }
+            KeyCode::PageDown => {
+                for _ in 0..8 {
+                    self.move_psel(1);
                 }
             }
             KeyCode::Enter | KeyCode::Char(' ') => self.activate_prop(),
+            KeyCode::Delete | KeyCode::Char('r') => self.reset_prop(),
             KeyCode::Tab | KeyCode::Esc => self.focus = Focus::Explorer,
             _ => {}
         }
@@ -1162,7 +1405,7 @@ impl App {
                     let n = self.rows.len() as isize;
                     self.sel = (self.sel as isize + d).clamp(0, (n - 1).max(0)) as usize;
                 } else {
-                    let count = self.selected().map(|i| prop_rows(i).len()).unwrap_or(0) as isize;
+                    let count = self.selected().map(|i| prop_rows(i, self.api.as_ref()).len()).unwrap_or(0) as isize;
                     self.psel = (self.psel as isize + d).clamp(0, (count - 1).max(0)) as usize;
                 }
             }
@@ -1188,8 +1431,8 @@ impl App {
                     }
                 } else if y >= ex_h + 2 && y < ex_h + 2 + pr_h {
                     let idx = self.pscroll + (y - (ex_h + 2));
-                    let count = self.selected().map(|i| prop_rows(i).len()).unwrap_or(0);
-                    if idx < count {
+                    let rows = self.selected().map(|i| prop_rows(i, self.api.as_ref())).unwrap_or_default();
+                    if idx < rows.len() && !matches!(rows[idx].kind, PKind::Header) {
                         let was = self.psel == idx && self.focus == Focus::Props;
                         self.focus = Focus::Props;
                         self.psel = idx;
@@ -1289,7 +1532,7 @@ impl App {
             w,
         );
         if let Some(inst) = self.selected() {
-            let rows = prop_rows(inst);
+            let rows = prop_rows(inst, self.api.as_ref());
             let key_w = rows.iter().map(|r| r.key.chars().count()).max().unwrap_or(8).clamp(8, 28);
             for line in 0..pr_h {
                 let idx = self.pscroll + line;
@@ -1298,9 +1541,15 @@ impl App {
                     Some(r) => r,
                     None => break,
                 };
+                if matches!(r.kind, PKind::Header) {
+                    scr.text(1, y, &format!("▾ {}", r.key), tui::bold(st(Color::Yellow, Color::Reset)), w.saturating_sub(2));
+                    continue;
+                }
                 let selected = self.focus == Focus::Props && idx == self.psel;
                 let (ks, vs) = if selected {
                     (tui::SEL, tui::SEL)
+                } else if r.default {
+                    (st(Color::Cyan, Color::Reset), tui::DIM)
                 } else {
                     (st(Color::Cyan, Color::Reset), tui::NORMAL)
                 };
@@ -1321,7 +1570,7 @@ impl App {
         } else if let Some(s) = &self.stale {
             format!(" ! {s}")
         } else {
-            " Arrows move  Space/Enter menu  a add  i insert child  Tab properties  Ctrl+P paste  Ctrl+S save  Ctrl+Z undo  / find  q quit".to_string()
+            " Space/Enter menu  a add  i child  Tab props (Enter edit, r reset)  Ctrl+P paste  Ctrl+D dup  Ctrl+S save  Ctrl+Z undo  q quit".to_string()
         };
         scr.text(0, sy, &text, sstyle, w);
 
@@ -1364,7 +1613,7 @@ impl App {
 
 impl PRow {
     fn clone_row(&self) -> PRow {
-        PRow { key: self.key.clone(), val: self.val.clone(), kind: self.kind.clone() }
+        PRow { key: self.key.clone(), val: self.val.clone(), kind: self.kind.clone(), default: self.default }
     }
 }
 

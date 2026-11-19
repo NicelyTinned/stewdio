@@ -37,6 +37,7 @@ pub fn request(
         .args([
             "-sS",
             "-L",
+            "--compressed",
             "--max-time",
             "900",
             "-X",

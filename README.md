@@ -1,4 +1,4 @@
-# Stewdio v0.5
+# Stewdio v0.6
 
 A standalone Roblox place file toolkit: **decompile → edit → compile → upload**, no Roblox Studio required.
 
@@ -6,6 +6,8 @@ A standalone Roblox place file toolkit: **decompile → edit → compile → upl
 
 | Command | What it does |
 |---|---|
+| `from <universe> <place>` | Create a project by downloading a place from Roblox |
+| `pull` | Replace the project's instances with the latest copy of its place |
 | `new`, `init` | Create / initialize a place or `--model` project |
 | `decompile <file>` | `.rbxl`, `.rbxlx`, `.rbxm`, `.rbxmx` → project directory |
 | `compile` | Project → `.rbxl` / `.rbxlx` (places) or `.rbxm` / `.rbxmx` (models) |
@@ -18,6 +20,9 @@ A standalone Roblox place file toolkit: **decompile → edit → compile → upl
 | `auth` | `login`, `logout`, `status`, `list`, `use <profile>` |
 | `upload` | Upload a place with Open Cloud (saved by default, `--publish` to go live) |
 | `revert` | Re-upload an earlier snapshot as a new version |
+| `diff <a> <b>` | Compare two place/model files or project directories |
+| `tree`, `find <text>` | Print the hierarchy / search names, scripts and property values |
+| `open` | Compile and open the result in Roblox Studio (default program) |
 | `clean`, `completions <shell>` | Remove build output / shell completions |
 
 ## Metadata format
@@ -43,6 +48,17 @@ A standalone Roblox place file toolkit: **decompile → edit → compile → upl
       Tags: []
     }
 
+## Downloading a place (`from` / `pull`)
+
+    stewdio auth login                  # key needs the "legacy-asset:manage" permission
+    stewdio from 123456789 987654321    # <universe_id> <place_id>
+    cd my-place && stewdio explorer
+    stewdio pull                        # later: refresh from Roblox (old files go to .stewdio/backup)
+
+`from` asks Roblox's asset delivery API for the place file, converts it into a project (universe and place IDs are
+written to `Project.toml`, so `upload` works immediately) and keeps the download as a baseline snapshot for `revert`.
+Options: `--name`, `--path`, `--version <n>`, `--no-scripts`, `--profile`. The place must belong to the API key's owner.
+
 ## Explorer
 
 `stewdio explorer` opens the project in a split terminal view: the **instance tree** on top and the **properties** of
@@ -65,7 +81,11 @@ the selected instance below. Rows are indented by depth; `▸` marks a closed in
 
 **Edit** on a Script, LocalScript or ModuleScript opens a full-screen script editor (Luau syntax highlighting, block
 balance diagnostics, auto-indent, find, undo). **Ctrl+X exits** the editor; Ctrl+S applies without leaving. **Edit** on any
-other instance moves to the properties tab, where Enter edits a value. The mouse works too (click rows and menu items,
+other instance moves to the properties tab. The **properties tab lists every savable property of the class** (grouped by category, like Studio). Properties you have
+not set show their default value in grey; Enter on one creates it with the value you type (enum names such as `Wood` are
+accepted), `r` / Delete resets a set property back to its default. This needs `stewdio api update`; without the data only
+the properties that are set are listed. Defaults come from the dump when it has them, plus a small built-in table.
+Ctrl+D duplicates the selected instance. The mouse works too (click rows and menu items,
 scroll wheel). Saving moves the old instance folders to `.stewdio/backup/` first (the newest 5 are kept).
 
 ## Output format

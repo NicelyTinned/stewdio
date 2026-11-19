@@ -433,73 +433,38 @@ pub struct DecompileArgs {
     pub overwrite: bool,
 }
 
-pub fn decompile(a: DecompileArgs) -> CliResult<()> {
-    if !a.input.is_file() {
-        return Err(CliError::new(ARGS, format!("Input file '{}' not found", a.input.display())));
+/// Parse place/model bytes (binary or XML).
+pub fn decode_bytes(data: &[u8]) -> CliResult<rbxlx::Decoded> {
+    if data.starts_with(b"<roblox!") {
+        return rbxl::decode(data).map_err(|e| CliError::new(PARSE, e));
     }
-    println!("[Stewdio] Reading {}...", a.input.display());
-    let data = fs::read(&a.input)?;
-    let is_binary = data.starts_with(b"<roblox!");
-    if !is_binary {
-        let head = String::from_utf8_lossy(&data[..data.len().min(64)]).to_string();
-        let head = head.trim_start_matches('\u{feff}').trim_start().to_string();
-        if !(head.starts_with("<roblox") || head.starts_with("<?xml")) {
-            return Err(CliError::new(UNSUPPORTED, "Unsupported input file format"));
-        }
+    let head = String::from_utf8_lossy(&data[..data.len().min(64)]).to_string();
+    let head = head.trim_start_matches('\u{feff}').trim_start().to_string();
+    if !(head.starts_with("<roblox") || head.starts_with("<?xml")) {
+        return Err(CliError::new(UNSUPPORTED, "Unsupported input file format"));
     }
+    let text = std::str::from_utf8(data).map_err(|_| CliError::new(PARSE, "Input file is not valid UTF-8"))?;
+    rbxlx::decode(text).map_err(|e| CliError::new(PARSE, e))
+}
 
-    let stem = a
-        .input
-        .file_stem()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "project".to_string());
-    let out = a.output.clone().unwrap_or_else(|| PathBuf::from(".").join(util::sanitize_name(&stem)));
+pub struct ImportStats {
+    pub instances: usize,
+    pub scripts: usize,
+    pub warnings: Vec<String>,
+}
 
-    if out.is_file() {
-        return Err(CliError::new(GENERAL, format!("Output path '{}' is a file", out.display())));
-    }
-    if dir_nonempty(&out) {
-        if !a.overwrite {
-            return Err(CliError::new(
-                GENERAL,
-                format!("Output directory '{}' already exists and is not empty (use --overwrite)", out.display()),
-            ));
-        }
-        let canon = fs::canonicalize(&out)?;
-        let cwd = fs::canonicalize(std::env::current_dir()?)?;
-        if cwd.starts_with(&canon) || canon.parent().is_none() {
-            return Err(CliError::new(
-                GENERAL,
-                "Refusing to overwrite the current directory, one of its parents, or the filesystem root",
-            ));
-        }
-        if !util::confirm(&format!("Delete the existing contents of '{}' and continue?", out.display())) {
-            return Err(CliError::new(GENERAL, "Aborted"));
-        }
-        fs::remove_dir_all(&out)?;
-    }
-
-    let decoded = if is_binary {
-        println!("[Stewdio] Detecting binary format...");
-        println!("[Stewdio] Decompressing chunks...");
-        rbxl::decode(&data).map_err(|e| CliError::new(PARSE, e))?
-    } else {
-        println!("[Stewdio] Detecting XML format...");
-        println!("[Stewdio] Parsing XML...");
-        let text = String::from_utf8(data)
-            .map_err(|_| CliError::new(PARSE, "Input file is not valid UTF-8"))?;
-        rbxlx::decode(&text).map_err(|e| CliError::new(PARSE, e))?
-    };
-    println!("[Stewdio] Reconstructing instances...");
-    println!("[Stewdio] Extracting properties...");
-    println!("[Stewdio] Extracting scripts...");
-    println!("[Stewdio] Writing project files...");
-    fs::create_dir_all(&out)?;
-    let input_is_model = matches!(
-        a.input.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref(),
-        Some("rbxm") | Some("rbxmx")
-    );
-    let as_model = a.model || input_is_model;
+/// Turn place/model bytes into a project directory.
+pub fn import_bytes(
+    data: &[u8],
+    stem: &str,
+    out: &Path,
+    as_model: bool,
+    input_is_model: bool,
+    no_scripts: bool,
+    universe: Option<u64>,
+    place: Option<u64>,
+) -> CliResult<ImportStats> {
+    let decoded = decode_bytes(data)?;
     let mut warnings = decoded.warnings.clone();
     let mut roots = decoded.roots;
     if as_model && !input_is_model {
@@ -518,24 +483,103 @@ pub fn decompile(a: DecompileArgs) -> CliResult<()> {
             warnings.push(format!("{flattened} service(s) were flattened into model roots; service properties were dropped"));
         }
     }
-    fsproj::write_children(&out, &roots, &WriteOptions { write_scripts: !a.no_scripts }, &mut warnings)?;
+    fs::create_dir_all(out)?;
+    fsproj::write_children(out, &roots, &WriteOptions { write_scripts: !no_scripts }, &mut warnings)?;
     let kind = if as_model { "model" } else { "place" };
-    fs::write(out.join("Project.toml"), project::render_project_toml(&stem, kind, "baseplate"))?;
+    fs::write(out.join("Project.toml"), project::render_project_toml_with_ids(stem, kind, "baseplate", universe, place))?;
     fs::write(out.join(".stewdioignore"), project::DEFAULT_IGNORE)?;
+    Ok(ImportStats {
+        instances: roots.iter().map(|r| r.count()).sum(),
+        scripts: roots.iter().map(|r| r.script_count()).sum(),
+        warnings,
+    })
+}
 
+/// Make sure `out` can receive a project (optionally clearing it after confirmation).
+pub fn prepare_output_dir(out: &Path, overwrite: bool) -> CliResult<()> {
+    if out.is_file() {
+        return Err(CliError::new(GENERAL, format!("Output path '{}' is a file", out.display())));
+    }
+    if dir_nonempty(out) {
+        if !overwrite {
+            return Err(CliError::new(
+                GENERAL,
+                format!("Output directory '{}' already exists and is not empty (use --overwrite)", out.display()),
+            ));
+        }
+        let canon = fs::canonicalize(out)?;
+        let cwd = fs::canonicalize(std::env::current_dir()?)?;
+        if cwd.starts_with(&canon) || canon.parent().is_none() {
+            return Err(CliError::new(
+                GENERAL,
+                "Refusing to overwrite the current directory, one of its parents, or the filesystem root",
+            ));
+        }
+        if !util::confirm(&format!("Delete the existing contents of '{}' and continue?", out.display())) {
+            return Err(CliError::new(GENERAL, "Aborted"));
+        }
+        fs::remove_dir_all(out)?;
+    }
+    Ok(())
+}
+
+pub fn decompile(a: DecompileArgs) -> CliResult<()> {
+    if !a.input.is_file() {
+        return Err(CliError::new(ARGS, format!("Input file '{}' not found", a.input.display())));
+    }
+    println!("[Stewdio] Reading {}...", a.input.display());
+    let data = fs::read(&a.input)?;
+    let stem = a
+        .input
+        .file_stem()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "project".to_string());
+    let out = a.output.clone().unwrap_or_else(|| PathBuf::from(".").join(util::sanitize_name(&stem)));
+    prepare_output_dir(&out, a.overwrite)?;
+    let input_is_model = matches!(
+        a.input.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref(),
+        Some("rbxm") | Some("rbxmx")
+    );
+    println!(
+        "[Stewdio] Detecting {} format...",
+        if data.starts_with(b"<roblox!") { "binary" } else { "XML" }
+    );
+    println!("[Stewdio] Reconstructing instances, properties and scripts...");
+    let stats = import_bytes(&data, &stem, &out, a.model || input_is_model, input_is_model, a.no_scripts, None, None)?;
     if a.verbose {
-        for w in &warnings {
+        for w in &stats.warnings {
             ui::warning(w);
         }
     }
-    let instances: usize = roots.iter().map(|r| r.count()).sum();
-    let scripts: usize = roots.iter().map(|r| r.script_count()).sum();
     ui::success("\nDecompilation successful!\n");
-    println!("Instances: {instances}");
-    println!("Scripts: {scripts}");
-    println!("Warnings: {}", warnings.len());
+    println!("Instances: {}", stats.instances);
+    println!("Scripts: {}", stats.scripts);
+    println!("Warnings: {}", stats.warnings.len());
     println!("Output: {}", out.display());
     Ok(())
+}
+
+// --------------------------------------------------------------- open
+
+/// Compile the project and open the result with the system's default program (usually Roblox Studio).
+pub fn open_built() -> CliResult<()> {
+    let project = Project::current()?;
+    let built = build(
+        &project,
+        &CompileArgs { xml: false, binary: false, output: None, release: false, verbose: false, quiet: true, no_cache: false, autofill: None },
+    )?;
+    ui::step(&format!("Opening {}", built.out.display()));
+    let status = if cfg!(windows) {
+        std::process::Command::new("cmd").args(["/C", "start", ""]).arg(&built.out).status()
+    } else if cfg!(target_os = "macos") {
+        std::process::Command::new("open").arg(&built.out).status()
+    } else {
+        std::process::Command::new("xdg-open").arg(&built.out).status()
+    };
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        _ => Err(CliError::new(GENERAL, format!("Could not open the file automatically; open {} yourself", built.out.display()))),
+    }
 }
 
 // ------------------------------------------------------------ validate
