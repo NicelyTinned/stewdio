@@ -45,7 +45,7 @@ pub fn write_meta(dir: &Path, inst: &Instance) -> io::Result<()> {
     fs::write(dir.join("Instance.data.hjson"), meta_text(inst))
 }
 
-fn unique(used: &mut HashSet<String>, base: &str, make: impl Fn(&str) -> String) -> (String, String) {
+pub fn unique(used: &mut HashSet<String>, base: &str, make: impl Fn(&str) -> String) -> (String, String) {
     let mut b = base.to_string();
     let mut n = 1;
     loop {
@@ -82,16 +82,34 @@ fn write_instance(
 ) -> io::Result<()> {
     let base = util::sanitize_name(&inst.name);
     let kind = script_kind(&inst.class);
-    let as_file = opts.write_scripts && inst.source.is_some() && inst.children.is_empty() && kind.is_some();
-    if as_file {
+    // Scripts are always a file plus sidecar; a script with children also gets a companion
+    // folder with the same name (`Main.server.lua` + `Main/`) that holds its children.
+    if opts.write_scripts && inst.source.is_some() && kind.is_some() {
         let kind = kind.unwrap_or("module");
-        let (b, fname) = unique(used, &base, |b: &str| format!("{b}.{kind}.lua"));
+        let mut b = base.clone();
+        let mut n = 1;
+        let fname = loop {
+            let f = format!("{b}.{kind}.lua");
+            let (fk, dk) = (f.to_lowercase(), b.to_lowercase());
+            if !used.contains(&fk) && !used.contains(&dk) {
+                used.insert(fk);
+                used.insert(dk);
+                break f;
+            }
+            n += 1;
+            b = format!("{base}~{n}");
+        };
         if b != base {
             warnings.push(format!("'{}' was renamed to '{}' on disk (name collision)", inst.name, b));
         }
         let stem = format!("{b}.{kind}");
         fs::write(dir.join(&fname), inst.source.as_deref().unwrap_or(""))?;
         fs::write(dir.join(format!("{stem}.data.hjson")), meta_text(inst))?;
+        if !inst.children.is_empty() {
+            let companion = dir.join(&b);
+            fs::create_dir_all(&companion)?;
+            write_children(&companion, &inst.children, opts, warnings)?;
+        }
         return Ok(());
     }
     let (b, dname) = unique(used, &base, |b: &str| b.to_string());
@@ -132,7 +150,7 @@ pub fn load(root: &Path, model: bool) -> Loaded {
     let mut l = Loader { ignore: IgnoreSet::load(root), diags: Vec::new(), ignored: 0 };
     let mut roots = Vec::new();
     for (name, p, is_dir) in l.entries(root) {
-        if name.starts_with('.') || name == "Project.toml" {
+        if name.starts_with('.') || name == "Project.toml" || (is_dir && name == "assets") {
             continue;
         }
         if l.ignore.is_ignored(&name, is_dir) {
@@ -211,6 +229,73 @@ impl Loader {
         }
     }
 
+    /// Load the instances inside a directory. With `allow_init`, `init.*.lua` files define the
+    /// directory's own script source (returned as the second value).
+    fn load_entries(&mut self, path: &Path, rel: &str, allow_init: bool) -> (Vec<Instance>, Option<(String, String)>) {
+        let mut init_src: Option<(String, String)> = None;
+        let mut children = Vec::new();
+        let entries = self.entries(path);
+        let names: HashSet<String> = entries.iter().map(|e| e.0.clone()).collect();
+        // names of scripts that may own a companion folder
+        let mut script_names: HashSet<String> = HashSet::new();
+        for (n, _, is_dir) in &entries {
+            if *is_dir {
+                continue;
+            }
+            if let Some(stem) = n.strip_suffix(".lua") {
+                let name = stem
+                    .strip_suffix(".server")
+                    .or_else(|| stem.strip_suffix(".client"))
+                    .or_else(|| stem.strip_suffix(".module"))
+                    .unwrap_or(stem);
+                script_names.insert(name.to_string());
+            }
+        }
+        for (name, p, is_dir) in entries {
+            let child_rel = format!("{rel}/{name}");
+            if self.ignore.is_ignored(&child_rel, is_dir) {
+                self.ignored += 1;
+                continue;
+            }
+            if is_dir {
+                if script_names.contains(&name) && !p.join("Instance.data.hjson").is_file() {
+                    continue; // children of the script with the same name
+                }
+                if let Some(c) = self.load_dir(&p, &child_rel, false) {
+                    children.push(c);
+                }
+                continue;
+            }
+            if name == "Instance.data.hjson" {
+                continue;
+            }
+            if let Some(kind) = init_kind(&name) {
+                if allow_init {
+                    if let Some(src) = self.read_source(&p, &child_rel) {
+                        init_src = Some((kind.to_string(), src));
+                    }
+                } else {
+                    self.warn(format!("{child_rel}: init script ignored inside a script's companion folder"));
+                }
+                continue;
+            }
+            if let Some(stem) = name.strip_suffix(".data.hjson") {
+                if !names.contains(&format!("{stem}.lua")) {
+                    self.warn(format!("{child_rel}: metadata file has no matching .lua script"));
+                }
+                continue;
+            }
+            if let Some(stem) = name.strip_suffix(".lua") {
+                if let Some(c) = self.load_script(&p, &child_rel, stem, path, rel) {
+                    children.push(c);
+                }
+                continue;
+            }
+            self.warn(format!("{child_rel}: unsupported file ignored"));
+        }
+        (children, init_src)
+    }
+
     fn load_dir(&mut self, path: &Path, rel: &str, top: bool) -> Option<Instance> {
         let dirname = path.file_name()?.to_string_lossy().to_string();
         let meta_path = path.join("Instance.data.hjson");
@@ -230,45 +315,7 @@ impl Loader {
             self.warn(format!("{rel}: no Instance.data.hjson, treating as a Folder"));
         }
 
-        let mut init_src: Option<(String, String)> = None;
-        let mut children = Vec::new();
-        let entries = self.entries(path);
-        let names: HashSet<String> = entries.iter().map(|e| e.0.clone()).collect();
-        for (name, p, is_dir) in entries {
-            let child_rel = format!("{rel}/{name}");
-            if self.ignore.is_ignored(&child_rel, is_dir) {
-                self.ignored += 1;
-                continue;
-            }
-            if is_dir {
-                if let Some(c) = self.load_dir(&p, &child_rel, false) {
-                    children.push(c);
-                }
-                continue;
-            }
-            if name == "Instance.data.hjson" {
-                continue;
-            }
-            if let Some(kind) = init_kind(&name) {
-                if let Some(src) = self.read_source(&p, &child_rel) {
-                    init_src = Some((kind.to_string(), src));
-                }
-                continue;
-            }
-            if let Some(stem) = name.strip_suffix(".data.hjson") {
-                if !names.contains(&format!("{stem}.lua")) {
-                    self.warn(format!("{child_rel}: metadata file has no matching .lua script"));
-                }
-                continue;
-            }
-            if let Some(stem) = name.strip_suffix(".lua") {
-                if let Some(c) = self.load_script(&p, &child_rel, stem, path) {
-                    children.push(c);
-                }
-                continue;
-            }
-            self.warn(format!("{child_rel}: unsupported file ignored"));
-        }
+        let (children, init_src) = self.load_entries(path, rel, true);
 
         let default_class: String = match (&init_src, &meta) {
             (Some((k, _)), _) => class_for_kind(k).unwrap_or("ModuleScript").to_string(),
@@ -283,7 +330,7 @@ impl Loader {
         Some(inst)
     }
 
-    fn load_script(&mut self, p: &Path, rel: &str, stem: &str, dir: &Path) -> Option<Instance> {
+    fn load_script(&mut self, p: &Path, rel: &str, stem: &str, dir: &Path, dir_rel: &str) -> Option<Instance> {
         let (name_stem, kind) = if let Some(s) = stem.strip_suffix(".server") {
             (s, "server")
         } else if let Some(s) = stem.strip_suffix(".client") {
@@ -307,6 +354,15 @@ impl Loader {
         let default_class = class_for_kind(kind).unwrap_or("ModuleScript");
         let mut inst = self.build_instance(meta.as_ref(), default_class, name_stem, rel)?;
         inst.source = Some(src);
+        // companion folder: `Name/` next to `Name.server.lua` holds the script's children
+        let companion = dir.join(name_stem);
+        if companion.is_dir() && !companion.join("Instance.data.hjson").is_file() {
+            let comp_rel = format!("{dir_rel}/{name_stem}");
+            if !self.ignore.is_ignored(&comp_rel, true) {
+                let (kids, _) = self.load_entries(&companion, &comp_rel, false);
+                inst.children = kids;
+            }
+        }
         Some(inst)
     }
 
@@ -407,7 +463,7 @@ pub fn save_project(root: &Path, model: bool, roots: &[Instance]) -> io::Result<
     for e in fs::read_dir(root)?.flatten() {
         let p = e.path();
         let name = e.file_name().to_string_lossy().to_string();
-        if !p.is_dir() || name.starts_with('.') || ignore.is_ignored(&name, true) {
+        if !p.is_dir() || name.starts_with('.') || name == "assets" || ignore.is_ignored(&name, true) {
             continue;
         }
         if model || p.join("Instance.data.hjson").is_file() {

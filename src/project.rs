@@ -38,6 +38,16 @@ pub struct ProjectFile {
     pub decompiler: DecompilerSection,
     #[serde(default)]
     pub templates: TemplatesSection,
+    #[serde(default)]
+    pub assets: AssetsSection,
+}
+
+/// Who owns assets uploaded by Stewdio (defaults to the owner of the API key).
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+pub struct AssetsSection {
+    pub creator_user_id: Option<u64>,
+    pub creator_group_id: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -260,6 +270,10 @@ extract_assets = true
 
 [templates]
 name = \"{template}\"
+
+[assets]
+# Files in assets/ are uploaded automatically when referenced as file://name.png
+# creator_user_id = 123456789    # or creator_group_id; defaults to the API key's owner
 "
     )
 }

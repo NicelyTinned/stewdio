@@ -24,6 +24,8 @@ const KEYS: &[(&str, &str)] = &[
     ("decompiler.extract_scripts", "bool"),
     ("decompiler.extract_assets", "bool"),
     ("templates.name", "baseplate|empty"),
+    ("assets.creator_user_id", "int"),
+    ("assets.creator_group_id", "int"),
 ];
 
 #[derive(Args)]

@@ -414,6 +414,62 @@ fn write_value(v: &Value, ind: usize, out: &mut String) {
     }
 }
 
+/// Strict JSON output (quoted keys, commas) for files other tools read, e.g. Rojo projects.
+pub fn to_json_string(v: &Value) -> String {
+    let mut s = String::new();
+    write_json(v, 0, &mut s);
+    s.push('\n');
+    s
+}
+
+fn write_json(v: &Value, ind: usize, out: &mut String) {
+    match v {
+        Value::Null => out.push_str("null"),
+        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        Value::Number(n) => out.push_str(n),
+        Value::Str(s) => write_quoted(s, out),
+        Value::Array(a) => {
+            if a.is_empty() {
+                out.push_str("[]");
+            } else if a.len() <= 16 && a.iter().all(|x| matches!(x, Value::Number(_) | Value::Bool(_) | Value::Null)) {
+                out.push('[');
+                for (i, x) in a.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    write_json(x, ind, out);
+                }
+                out.push(']');
+            } else {
+                out.push_str("[\n");
+                for (i, x) in a.iter().enumerate() {
+                    pad(out, ind + 1);
+                    write_json(x, ind + 1, out);
+                    out.push_str(if i + 1 < a.len() { ",\n" } else { "\n" });
+                }
+                pad(out, ind);
+                out.push(']');
+            }
+        }
+        Value::Object(o) => {
+            if o.is_empty() {
+                out.push_str("{}");
+            } else {
+                out.push_str("{\n");
+                for (i, (k, x)) in o.iter().enumerate() {
+                    pad(out, ind + 1);
+                    write_quoted(k, out);
+                    out.push_str(": ");
+                    write_json(x, ind + 1, out);
+                    out.push_str(if i + 1 < o.len() { ",\n" } else { "\n" });
+                }
+                pad(out, ind);
+                out.push('}');
+            }
+        }
+    }
+}
+
 /// Like `to_string` but starts with a `#` comment line.
 pub fn to_string_with_header(v: &Value, header: &str) -> String {
     format!("# {header}\n{}", to_string(v))

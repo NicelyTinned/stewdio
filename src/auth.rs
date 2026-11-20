@@ -155,6 +155,28 @@ fn introspect(key: &str) -> Result<Option<String>, CliError> {
     Ok(Some(format!("key \"{}\", scopes: {}", name, if scopes.is_empty() { "none listed".to_string() } else { scopes.join(", ") })))
 }
 
+/// The user id that owns an API key (from Roblox's key introspection), if it can be determined.
+pub fn authorized_user(key: &str) -> Option<String> {
+    let body = format!("{{\"apiKey\":\"{}\"}}", key.replace('\\', "\\\\").replace('"', "\\\""));
+    let resp = http::request(
+        "POST",
+        "https://apis.roblox.com/api-keys/v1/introspect",
+        &[("Content-Type", "application/json".to_string())],
+        None,
+        Some(&body),
+    )
+    .ok()?;
+    if resp.status != 200 {
+        return None;
+    }
+    let v = hjson::parse(&String::from_utf8_lossy(&resp.body)).ok()?;
+    match v.get("authorizedUserId") {
+        Some(hjson::Value::Str(s)) => Some(s.clone()),
+        Some(hjson::Value::Number(n)) => Some(n.clone()),
+        _ => None,
+    }
+}
+
 pub fn run(a: AuthArgs) -> CliResult<()> {
     match a.cmd.unwrap_or(AuthCmd::Login { profile: None, stdin: false }) {
         AuthCmd::Login { profile, stdin } => {

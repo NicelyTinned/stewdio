@@ -1,4 +1,5 @@
 mod api;
+mod assets;
 mod auth;
 mod commands;
 mod editor;
@@ -22,6 +23,7 @@ mod model;
 mod project;
 mod rbxl;
 mod remote;
+mod rojo;
 mod rbxlx;
 mod ui;
 mod upload;
@@ -88,6 +90,10 @@ enum Command {
     Find(inspect::FindArgs),
     /// Compile the project and open it with the default program (Roblox Studio)
     Open,
+    /// Manage the assets/ folder: upload files and track their Roblox asset ids
+    Assets(assets::AssetsArgs),
+    /// Convert between Stewdio projects and Rojo projects
+    Rojo(rojo::RojoArgs),
     /// Display Stewdio version
     Version,
 }
@@ -128,6 +134,8 @@ fn run(cli: Cli) -> CliResult<()> {
         Command::Tree(a) => inspect::tree(a),
         Command::Find(a) => inspect::find(a),
         Command::Open => commands::open_built(),
+        Command::Assets(a) => assets::run(a),
+        Command::Rojo(a) => rojo::run(a),
         Command::Version => {
             println!("stewdio {}", env!("CARGO_PKG_VERSION"));
             Ok(())

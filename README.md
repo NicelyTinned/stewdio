@@ -1,4 +1,4 @@
-# Stewdio v0.6
+# Stewdio v0.7
 
 A standalone Roblox place file toolkit: **decompile → edit → compile → upload**, no Roblox Studio required.
 
@@ -23,7 +23,59 @@ A standalone Roblox place file toolkit: **decompile → edit → compile → upl
 | `diff <a> <b>` | Compare two place/model files or project directories |
 | `tree`, `find <text>` | Print the hierarchy / search names, scripts and property values |
 | `open` | Compile and open the result in Roblox Studio (default program) |
+| `assets` | Manage `assets/`: `status`, `list`, `sync`, `forget` |
+| `rojo export` / `rojo import` | Convert between Stewdio and Rojo projects |
 | `clean`, `completions <shell>` | Remove build output / shell completions |
+
+## Project layout
+
+    my-game/
+    ├── Project.toml
+    ├── Assets.toml            # asset ids written by Stewdio (commit it)
+    ├── assets/                # files you reference as file://name.png
+    ├── Workspace/             # one folder per instance, each with Instance.data.hjson
+    └── ServerScriptService/
+        ├── Main.server.lua            # a script is a file ...
+        ├── Main.server.data.hjson     # ... with its metadata
+        └── Main/                      # ... and an optional folder holding its children
+            └── Config.module.lua
+
+Scripts can have children like any other instance: put them in a folder with the script's name next to the script
+file (`Main.server.lua` + `Main/`). The older layout (a folder with `init.server.lua`) still loads.
+
+## Assets
+
+Put files in `assets/` and refer to them as `file://<path inside assets/>` from scripts and instance properties:
+
+    local icon = "file://ui/sprite.png"       -- assets/ui/sprite.png
+    Image: file://ui/sprite.png               -- in Instance.data.hjson
+
+On `compile` (and `upload`, `watch`) Stewdio finds every reference, uploads new or changed files with the Open Cloud
+Assets API using your API key, records the result in `Assets.toml`, and rewrites the references to
+`rbxassetid://<id>` in the compiled file (your sources keep `file://`). Unchanged files are never uploaded twice.
+
+- API key permissions: **asset:read** and **asset:write** (Assets API), plus **legacy-asset:manage** for the Decal → Image conversion. Uploads are owned by the key's owner, or set
+  `assets.creator_user_id` / `assets.creator_group_id` with `stewdio settings set`.
+- Supported: png, jpg, bmp, tga (uploaded as Decals), mp3, ogg (Audio), fbx (Model), mp4, mov (Video).
+- `stewdio assets status|list|sync [--all] [--force]|forget <path>`; `compile --no-upload` fails instead of uploading,
+  `compile --no-assets` leaves `file://` untouched. `validate` reports references to missing files.
+- Images are uploaded as Decals, but `rbxassetid://` needs the **Image** id behind the Decal. Stewdio converts it
+  automatically: after an upload it downloads the Decal through the asset delivery API, reads the image id out of it and
+  stores that as `id` (the original in `decal_id`). This needs the `legacy-asset:manage` permission on the key; if the
+  lookup fails Stewdio warns and uses the Decal id, and retries on the next compile. Entries from earlier versions are
+  converted the same way.
+- Changed images become new assets with new ids (Roblox cannot overwrite decals); Roblox moderation can reject uploads.
+
+## Rojo conversion
+
+    stewdio rojo export [--output DIR] [--resolve-assets]   # Stewdio project -> default.project.json + src/
+    stewdio rojo import <dir | file.project.json>           # Rojo project -> Stewdio project
+
+Export writes scripts as `.server.lua` / `.client.lua` / `.lua` (with `init.*` for scripts that have children), folders as
+directories, and every other instance as a `.model.json`. Import understands `$className`, `$path`, `$properties`,
+`init.*` files, `.meta.json`, `.model.json`, `.rbxm(x)` and `.txt`; run `stewdio api update` first so enum names and other
+loosely written Rojo values get their proper types. Not converted: tags and attributes, Ref properties, nested project
+files, `.json`/`.csv`/`.toml` data files.
 
 ## Metadata format
 

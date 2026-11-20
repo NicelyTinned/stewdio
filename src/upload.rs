@@ -136,7 +136,7 @@ pub fn run(a: UploadArgs) -> CliResult<()> {
             ui::step("Compiling project...");
             let built = commands::build(
                 p,
-                &CompileArgs { xml: false, binary: false, output: None, release: false, verbose: false, quiet: true, no_cache: false, autofill: None },
+                &CompileArgs { xml: false, binary: false, output: None, release: false, verbose: false, quiet: true, no_cache: false, autofill: None, no_assets: false, no_upload: false },
             )?;
             built.out
         }

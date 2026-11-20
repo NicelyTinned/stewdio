@@ -6,7 +6,7 @@ use crate::error::*;
 use crate::fsproj::{self, WriteOptions};
 use crate::model::*;
 use crate::project::{self, xml_from_ext, Project};
-use crate::{api, rbxl, rbxlx, ui, util, validate};
+use crate::{api, assets, rbxl, rbxlx, ui, util, validate};
 
 fn say(quiet: bool, msg: &str) {
     if !quiet {
@@ -155,6 +155,8 @@ pub fn new_project(a: NewArgs) -> CliResult<()> {
     let kind = if model { "model" } else { "place" };
     fs::write(dir.join("Project.toml"), project::render_project_toml(&project_name, kind, &template))?;
     fs::write(dir.join(".stewdioignore"), project::DEFAULT_IGNORE)?;
+    fs::create_dir_all(dir.join(assets::DIR))?;
+    fs::write(dir.join(assets::DIR).join(".gitkeep"), "")?;
 
     println!("Created {kind} project '{}' at {}", project_name, dir.display());
     println!("\nNext steps:\n  cd {}\n  stewdio compile", dir.display());
@@ -248,6 +250,12 @@ pub struct CompileArgs {
     /// Property autofill mode: off, normalize or defaults
     #[arg(long)]
     pub autofill: Option<String>,
+    /// Leave file:// asset references untouched (no upload, no rewriting)
+    #[arg(long)]
+    pub no_assets: bool,
+    /// Do not upload new or changed assets (fails if any are missing from Assets.toml)
+    #[arg(long)]
+    pub no_upload: bool,
 }
 
 pub struct BuildResult {
@@ -343,6 +351,16 @@ pub fn build(project: &Project, a: &CompileArgs) -> CliResult<BuildResult> {
     errors.extend(fill.errors);
     warnings.extend(fill.warnings);
 
+    // file:// asset references: check that the files exist (uploading happens after validation)
+    let asset_plan = if a.no_assets {
+        None
+    } else {
+        let known = assets::known_files(&project.root);
+        let col = assets::collect(&roots, &known);
+        errors.extend(col.missing);
+        Some((known, col.refs))
+    };
+
     let release_failures = if a.release { warnings.len() } else { 0 };
     if !errors.is_empty() || release_failures > 0 {
         for e in &errors {
@@ -357,6 +375,21 @@ pub fn build(project: &Project, a: &CompileArgs) -> CliResult<BuildResult> {
             PROJECT,
             format!("Project validation failed with {} error(s)", errors.len() + release_failures),
         ));
+    }
+
+    let mut asset_count = 0;
+    let mut asset_uploads = 0;
+    if let Some((known, refs)) = asset_plan {
+        if !refs.is_empty() {
+            let res = assets::ensure_uploaded(
+                project,
+                &refs,
+                &assets::SyncOpts { allow_upload: !a.no_upload, force: false, quiet: q, profile: None },
+            )?;
+            assets::rewrite(&mut roots, &known, &res.ids);
+            asset_count = refs.len();
+            asset_uploads = res.uploaded;
+        }
     }
 
     say(q, "[Stewdio] Building DataModel...");
@@ -397,6 +430,9 @@ pub fn build(project: &Project, a: &CompileArgs) -> CliResult<BuildResult> {
         println!("Instances: {instances}");
         println!("Scripts: {scripts}");
         println!("Warnings: {}", warnings.len());
+        if asset_count > 0 {
+            println!("Assets: {asset_count} ({asset_uploads} uploaded)");
+        }
         println!("Time: {} ms", started.elapsed().as_millis());
     }
     Ok(BuildResult { out, use_xml, instances, scripts, warnings: warnings.len() })
@@ -566,7 +602,7 @@ pub fn open_built() -> CliResult<()> {
     let project = Project::current()?;
     let built = build(
         &project,
-        &CompileArgs { xml: false, binary: false, output: None, release: false, verbose: false, quiet: true, no_cache: false, autofill: None },
+        &CompileArgs { xml: false, binary: false, output: None, release: false, verbose: false, quiet: true, no_cache: false, autofill: None, no_assets: false, no_upload: false },
     )?;
     ui::step(&format!("Opening {}", built.out.display()));
     let status = if cfg!(windows) {
@@ -608,6 +644,17 @@ pub fn validate_project(a: ValidateArgs) -> CliResult<()> {
         let fill = api::process(database.as_ref(), &mut tmp, st.autofill);
         errors.extend(fill.errors);
         warnings.extend(fill.warnings);
+    }
+    {
+        let known = assets::known_files(&project.root);
+        let col = assets::collect(&loaded.roots, &known);
+        errors.extend(col.missing);
+        let reg = assets::Registry::load(&project.root);
+        for r in &col.refs {
+            if !reg.entries.contains_key(r) {
+                warnings.push(format!("asset '{r}' has not been uploaded yet (it is uploaded on the next compile)"));
+            }
+        }
     }
     if let Some(h) = api::stale_hint(database.as_ref()) {
         ui::hint(&h);

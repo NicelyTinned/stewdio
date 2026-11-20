@@ -19,9 +19,14 @@ fn require_key(profile: Option<&str>) -> CliResult<String> {
 
 /// Download the raw place file (binary .rbxl or XML) of `place`.
 pub fn download_place(place: u64, version: Option<u64>, key: &str) -> CliResult<Vec<u8>> {
+    download_asset(place, version, key, "Place")
+}
+
+/// Download any asset's raw file through the asset delivery API (`what` is used in messages).
+pub fn download_asset(id: u64, version: Option<u64>, key: &str, what: &str) -> CliResult<Vec<u8>> {
     let url = match version {
-        Some(v) => format!("https://apis.roblox.com/asset-delivery-api/v1/assetId/{place}/version/{v}"),
-        None => format!("https://apis.roblox.com/asset-delivery-api/v1/assetId/{place}"),
+        Some(v) => format!("https://apis.roblox.com/asset-delivery-api/v1/assetId/{id}/version/{v}"),
+        None => format!("https://apis.roblox.com/asset-delivery-api/v1/assetId/{id}"),
     };
     let resp = http::request(
         "GET",
@@ -37,12 +42,12 @@ pub fn download_place(place: u64, version: Option<u64>, key: &str) -> CliResult<
         403 => {
             return Err(CliError::new(
                 AUTH,
-                "Permission denied (HTTP 403): the API key needs the \"legacy-asset:manage\" permission, the place must belong to the key's owner, and your IP must be allowed",
+                "Permission denied (HTTP 403): the API key needs the \"legacy-asset:manage\" permission, the asset must belong to the key's owner, and your IP must be allowed",
             ))
         }
-        404 => return Err(CliError::new(GENERAL, format!("Place {place} was not found (or is not accessible with this key)"))),
+        404 => return Err(CliError::new(GENERAL, format!("{what} {id} was not found (or is not available yet / accessible with this key)"))),
         429 => return Err(CliError::new(GENERAL, "Rate limited by Roblox (HTTP 429): try again in a minute")),
-        s => return Err(CliError::new(GENERAL, format!("Roblox returned HTTP {s} while requesting the place"))),
+        s => return Err(CliError::new(GENERAL, format!("Roblox returned HTTP {s} while requesting {what} {id}"))),
     }
     let body = String::from_utf8_lossy(&resp.body).to_string();
     let v = hjson::parse(&body).map_err(|_| CliError::new(PARSE, "Unexpected response from Roblox"))?;
@@ -58,8 +63,10 @@ pub fn download_place(place: u64, version: Option<u64>, key: &str) -> CliResult<
                 .and_then(|x| x.as_str())
                 .map(|s| s.to_string())
         })
-        .ok_or_else(|| CliError::new(GENERAL, "Roblox did not return a download location for this place"))?;
-    ui::step("Downloading place file...");
+        .ok_or_else(|| CliError::new(GENERAL, "Roblox did not return a download location for this asset"))?;
+    if what == "Place" {
+        ui::step("Downloading place file...");
+    }
     let file = http::request("GET", &location, &[], None, None).map_err(|e| CliError::new(GENERAL, e))?;
     if file.status != 200 {
         return Err(CliError::new(GENERAL, format!("Download failed (HTTP {})", file.status)));
